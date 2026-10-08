@@ -1,0 +1,100 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oswald"
+version = "0.1.0"
+description = "OSWALD: Autonomous agent pipeline for software development"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=1.12.0",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "structlog>=26.1.0",
+    "taskiq>=0.11.0",
+    "taskiq-redis>=1.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.15",
+    "mypy>=2.4.0",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.10",
+]
+
+[tool.importlinter]
+root_packages = ["oswald"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Core does not import api, workers, or db"
+type = "forbidden"
+source_modules = ["oswald.core"]
+forbidden_modules = ["oswald.api", "oswald.workers", "oswald.db"]
+
+[[tool.importlinter.contracts]]
+name = "Artifacts does not import sqlalchemy"
+type = "forbidden"
+source_modules = ["oswald.core.artifacts"]
+forbidden_modules = ["sqlalchemy"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "S",
+    "ASYNC",
+    "SIM",
+    "RUF",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = "oswald.*"
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests as integration tests",
+]
+addopts = [
+    "--cov=oswald",
+    "--cov-report=term-missing",
+]
+
+[tool.coverage.run]
+source = ["src/oswald"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
