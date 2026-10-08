@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Code Quality & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies from lockfile
+        run: uv sync --frozen
+
+      - name: Check code formatting
+        run: uv run ruff format --check
+
+      - name: Lint with ruff
+        run: uv run ruff check
+
+      - name: Typecheck with mypy
+        run: uv run mypy src tests
+
+      - name: Verify architectural import contracts
+        run: uv run lint-imports
+
+      - name: Run unit tests with coverage
+        run: uv run pytest -m "not integration"
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: oswald
+          POSTGRES_PASSWORD: oswald
+          POSTGRES_DB: oswald
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U oswald -d oswald"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://oswald:oswald@localhost:5432/oswald
+      REDIS_URL: redis://localhost:6379/0
+      ANTHROPIC_API_KEY: mock-key-for-ci
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies from lockfile
+        run: uv sync --frozen
+
+      - name: Run integration tests
+        run: uv run pytest -m "integration"
