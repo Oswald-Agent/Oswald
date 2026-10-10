@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=1.12.0",
+    "litellm>=1.104.2",
     "opentelemetry-api>=1.45.1",
     "opentelemetry-sdk>=1.45.1",
     "pydantic>=2.13.5",
@@ -63,6 +64,9 @@ select = [
     "SIM",
     "RUF",
 ]
+ignore = [
+    "E501",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
@@ -98,3 +102,7 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_empty = true
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
