@@ -165,28 +165,6 @@ async def test_get_diff_captures_committed_changes(manager: WorktreeManager) -> 
     await manager.remove_worktree("task-committed")
 
 
-async def test_get_diff_excludes_oswald_internal_dir(manager: WorktreeManager) -> None:
-    """get_diff ignores files inside .oswald directory such as execution logs."""
-    ctx = await manager.create_worktree("task-oswald-logs")
-
-    (ctx.worktree_path / "src" / "app.py").write_text(
-        "def run():\n    return 99\n", encoding="utf-8"
-    )
-
-    logs_dir = ctx.worktree_path / ".oswald" / "logs"
-    logs_dir.mkdir(parents=True)
-    (logs_dir / "exec_stdout.log").write_text("internal log output\n", encoding="utf-8")
-
-    diff_result: DiffResult = await manager.get_diff("task-oswald-logs")
-
-    assert "src/app.py" in [f.replace("\\", "/") for f in diff_result.files_changed]
-    assert not any(".oswald" in f for f in diff_result.files_changed)
-    assert ".oswald" not in diff_result.diff
-    assert "internal log output" not in diff_result.diff
-
-    await manager.remove_worktree("task-oswald-logs")
-
-
 async def test_get_diff_nonexistent_worktree_raises(manager: WorktreeManager) -> None:
     """Raises WorktreeError if trying to capture diff on nonexistent task."""
     with pytest.raises(WorktreeError, match="worktree directory does not exist"):

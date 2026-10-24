@@ -224,25 +224,18 @@ class WorktreeManager:
         if not target_base:
             target_base = "HEAD"
 
-        # Intent-to-add so git diff includes newly added files, excluding internal .oswald directory
-        await self._run_git(["add", "-N", "--", ".", ":!.oswald"], cwd=worktree_path, check=False)
+        # Intent-to-add so git diff includes newly added files
+        await self._run_git(["add", "-N", "."], cwd=worktree_path, check=False)
 
         # Capture raw unified diff against the base commit
-        _, diff_text, _ = await self._run_git(
-            ["diff", target_base, "--", ".", ":!.oswald"],
-            cwd=worktree_path,
-        )
+        _, diff_text, _ = await self._run_git(["diff", target_base], cwd=worktree_path)
 
         # Capture file names
         _, name_list, _ = await self._run_git(
-            ["diff", "--name-only", target_base, "--", ".", ":!.oswald"],
+            ["diff", "--name-only", target_base],
             cwd=worktree_path,
         )
-        files_changed = [
-            f.strip()
-            for f in name_list.splitlines()
-            if f.strip() and not f.strip().startswith(".oswald")
-        ]
+        files_changed = [f.strip() for f in name_list.splitlines() if f.strip()]
 
         return DiffResult(
             task_id=task_id,
