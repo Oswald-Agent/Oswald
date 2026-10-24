@@ -9,12 +9,20 @@ Forbidden imports:
 
 from oswald.core.vcs.exceptions import VCSError, WorktreeError
 from oswald.core.vcs.models import DiffResult, WorktreeContext
+from oswald.core.vcs.workspace import (
+    FakeWorkspaceDiff,
+    WorkspaceDiff,
+    WorktreeWorkspaceDiff,
+)
 from oswald.core.vcs.worktree import WorktreeManager
 
 __all__ = [
     "DiffResult",
+    "FakeWorkspaceDiff",
     "VCSError",
+    "WorkspaceDiff",
     "WorktreeContext",
     "WorktreeError",
     "WorktreeManager",
+    "WorktreeWorkspaceDiff",
 ]

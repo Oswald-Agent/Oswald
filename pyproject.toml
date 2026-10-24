@@ -48,6 +48,37 @@ type = "forbidden"
 source_modules = ["oswald.core.artifacts"]
 forbidden_modules = ["sqlalchemy"]
 
+[[tool.importlinter.contracts]]
+name = "LiteLLM and Anthropic SDK only inside the LLM adapter"
+type = "forbidden"
+source_modules = ["oswald"]
+forbidden_modules = ["litellm", "anthropic"]
+ignore_imports = ["oswald.core.llm.adapters.litellm_adapter -> litellm"]
+
+[[tool.importlinter.contracts]]
+name = "tree-sitter only inside the code index parser"
+type = "forbidden"
+source_modules = ["oswald"]
+forbidden_modules = ["tree_sitter_language_pack", "tree_sitter"]
+ignore_imports = ["oswald.core.codeindex.parser -> tree_sitter_language_pack"]
+
+[[tool.importlinter.contracts]]
+name = "api and workers never import the orchestrator directly"
+type = "forbidden"
+source_modules = ["oswald.api", "oswald.workers"]
+forbidden_modules = ["oswald.core.orchestrator"]
+
+[[tool.importlinter.contracts]]
+name = "Core building blocks do not import each other"
+type = "independence"
+modules = [
+    "oswald.core.llm",
+    "oswald.core.codeindex",
+    "oswald.core.artifacts",
+    "oswald.core.vcs",
+    "oswald.core.sandbox",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
