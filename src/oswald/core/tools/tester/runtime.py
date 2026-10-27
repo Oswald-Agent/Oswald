@@ -17,8 +17,8 @@ from oswald.core.sandbox.exceptions import SandboxError, SandboxTimeoutError
 from oswald.core.sandbox.protocol import SandboxRuntime
 from oswald.core.tools.coder.edit import is_protected_path
 from oswald.core.tools.coder.read import (
+    MAX_TOOL_OUTPUT_BYTES,
     normalize_workspace_rel_path,
-    truncate_output,
     validate_workspace_path,
 )
 
@@ -364,7 +364,14 @@ async def execute_test_command(
         )
 
     try:
-        result = await sandbox.exec_command(clean, timeout_seconds=timeout_seconds)
+        result = await sandbox.exec_command(
+            clean,
+            timeout_seconds=timeout_seconds,
+            env={
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPYCACHEPREFIX": "/tmp/oswald-test-pycache",  # noqa: S108
+            },
+        )
     except SandboxTimeoutError as exc:
         logger.error("test_tool.command_timeout", command=clean, timeout=timeout_seconds)
         return CommandResult(
@@ -377,7 +384,17 @@ async def execute_test_command(
         )
 
     combined_output = f"{result.stdout}\n{result.stderr}".strip()
-    output = truncate_output(combined_output or "Command completed with no output.")
+    output = combined_output or "Command completed with no output."
+    encoded = output.encode("utf-8")
+    if len(encoded) > MAX_TOOL_OUTPUT_BYTES:
+        marker = "\n[... middle of command output omitted ...]\n"
+        budget = MAX_TOOL_OUTPUT_BYTES - len(marker.encode("utf-8"))
+        head_bytes = budget // 2
+        output = (
+            encoded[:head_bytes].decode("utf-8", errors="ignore")
+            + marker
+            + encoded[-(budget - head_bytes) :].decode("utf-8", errors="ignore")
+        )
     logger.info(
         "test_tool.command_executed",
         command=clean,

@@ -74,7 +74,7 @@ class TesterAgent:
         event_sink: EventSink | None = None,
         indexer: CodeIndexer | None = None,
         model: str = "gemini/gemini-2.0-flash",
-        max_turns: int = 25,
+        max_turns: int = 100,
         max_schema_retries: int = 2,
         prompt_path: Path | None = None,
     ) -> None:
@@ -200,6 +200,32 @@ class TesterAgent:
             elif name in {"run_test_command", "run_diagnostic_command"}:
                 raw_command = args.get("command")
                 command = [str(c) for c in raw_command] if isinstance(raw_command, list) else []
+                if any(re.fullmatch(r"\|\|?|&&?|;|\d*[<>].*", token) for token in command) or (
+                    command
+                    and Path(command[0]).name
+                    in {"sh", "bash", "dash", "zsh", "cmd", "powershell", "pwsh"}
+                ):
+                    return (
+                        "PermissionDenied: commands are argument lists, not shell scripts. "
+                        "Remove pipes, redirections such as 2>&1, and shell wrappers. "
+                        "stdout and stderr are already captured. Run the test runner directly.",
+                        False,
+                        None,
+                    )
+                executable = Path(command[0]).name if command else ""
+                pip_command = bool(re.fullmatch(r"pip(?:\d+(?:\.\d+)?)?", executable)) or (
+                    executable.startswith(("python", "pypy"))
+                    and "-m" in command
+                    and "pip" in command
+                )
+                if pip_command and any(action in command for action in {"install", "uninstall"}):
+                    return (
+                        "PermissionDenied: do not install packages in the offline sandbox. "
+                        "Build required dependencies into an image on the host, then resume with "
+                        "continue --image <prepared-image>. Report missing dependencies as a blocker.",
+                        False,
+                        None,
+                    )
                 if (
                     len(command) > 1
                     and Path(command[0]).name in {"npm", "npm.cmd"}
@@ -421,9 +447,24 @@ class TesterAgent:
         final_draft: dict[str, Any] | None = None
         schema_retries = 0
         tool_failures: dict[str, int] = {}
+        verified_workspaces: dict[str, dict[str, str]] = {}
+        report_requested = False
 
         for turn in range(1, self.max_turns + 1):
             self.budget_guard.check(data.task_id)
+            report_only = turn == self.max_turns or report_requested
+            if report_only:
+                messages.append(
+                    Message(
+                        role=Role.USER,
+                        content=(
+                            "This turn is reserved for reporting. No tools are available. "
+                            "Return completion JSON now using the test evidence already collected. "
+                            "Report failed tests honestly; use ESCALATED if testing is blocked or "
+                            "no valid test suite has run."
+                        ),
+                    )
+                )
 
             try:
                 response = await complete(
@@ -431,7 +472,7 @@ class TesterAgent:
                     LLMRequest(
                         model=self.model,
                         messages=messages,
-                        tools=TESTER_TOOL_DEFINITIONS,
+                        tools=[] if report_only else TESTER_TOOL_DEFINITIONS,
                         temperature=0.0,
                     ),
                     turn=turn,
@@ -459,6 +500,13 @@ class TesterAgent:
             )
 
             if response.tool_calls:
+                if report_only:
+                    final_draft = {
+                        "status": "ESCALATED",
+                        "content": "# Test Report\n\nTester requested tools during its final "
+                        "reporting turn instead of returning completion JSON.",
+                    }
+                    break
                 messages.append(
                     Message(
                         role=Role.ASSISTANT,
@@ -469,11 +517,31 @@ class TesterAgent:
 
                 circuit_broken = False
                 for call in response.tool_calls:
+                    command_key = json.dumps(call.arguments.get("command"))
+                    unchanged_success = False
+                    if call.name == "run_test_command" and command_key in verified_workspaces:
+                        state = WorkspaceSnapshot.capture(self.workspace_root)
+                        unchanged_success = verified_workspaces[command_key] == {
+                            path: entry.sha256 for path, entry in state.files.items()
+                        }
                     with tool_call(call.name) as tool:
-                        output, tool_success, command_result = await self._execute_tool(
-                            call, forbidden_paths
-                        )
+                        if unchanged_success:
+                            output, tool_success, command_result = (
+                                "This exact test command already passed on the unchanged workspace. "
+                                "Its evidence is retained; no rerun was performed. "
+                                "Return your completion report now.",
+                                True,
+                                None,
+                            )
+                            report_requested = True
+                        else:
+                            output, tool_success, command_result = await self._execute_tool(
+                                call, forbidden_paths
+                            )
                         tool.success = tool_success
+
+                    if tool_success and call.name in {"write_test_file", "run_diagnostic_command"}:
+                        report_requested = False
 
                     if call.name == "write_test_file" and tool_success:
                         root = str(call.arguments.get("test_root") or "").strip("/")
@@ -489,6 +557,13 @@ class TesterAgent:
                         commands.append(command_result)
                         cmd_key = " ".join(command_result.command)
                         latest_commands[cmd_key] = command_result
+                        if command_result.exit_code == 0:
+                            state = WorkspaceSnapshot.capture(self.workspace_root)
+                            verified_workspaces[command_key] = {
+                                path: entry.sha256 for path, entry in state.files.items()
+                            }
+                        else:
+                            verified_workspaces.pop(command_key, None)
 
                     # Circuit breaker tracking on repeated genuine tool errors
                     sig = f"{call.name}:{json.dumps(call.arguments, sort_keys=True)}"

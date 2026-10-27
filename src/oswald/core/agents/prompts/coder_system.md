@@ -45,6 +45,10 @@ allowlisted static checks, or when you decide to escalate, respond with a JSON
 block formatted exactly as follows. If no allowlisted check applies to the
 project's language, hand off to Tester without running unrelated checks:
 
+After applicable checks pass, return the completion JSON promptly. Do not repeat
+successful checks or reread unchanged files unless new edits or an unresolved
+issue require it. A successful check with no output needs no further confirmation.
+
 For successful completion:
 ```json
 {
@@ -74,6 +78,9 @@ Note: The unified diff and list of modified files will be generated mechanically
 The default python:3.12-slim image includes Python and its standard library, but not
 ruff or mypy. Do not repeatedly run unavailable optional static checks or install
 dependencies over the network. Report unavailable checks as limitations.
+The tool reports missing optional checkers as `SKIPPED`, which does not mean they
+passed. Do not retry a skipped checker, including another Ruff check when Ruff
+is unavailable. Complete any remaining available checks and return completion JSON.
 
 All currently allowlisted static checks are Python-specific. For React, Node.js,
 or other non-Python projects, skip them and hand off build and test verification

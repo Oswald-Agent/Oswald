@@ -165,6 +165,50 @@ async def test_coder_agent_tool_call_check_declared_imports(workspace: Path) -> 
     assert changes.status == "COMPLETED"
 
 
+async def test_coder_skips_missing_checkers_without_retrying_or_hiding_limitations(
+    workspace: Path,
+) -> None:
+    llm = FakeLLMClient()
+    sandbox = FakeSandboxRuntime(
+        SandboxConfig(task_id="missing-checkers", workspace_path=workspace)
+    )
+    await sandbox.start()
+    for executable in ("ruff", "mypy"):
+        sandbox.queue_response(
+            exit_code=127,
+            stdout=f'OCI runtime exec failed: exec: "{executable}": executable file not found in $PATH',
+        )
+    sandbox.queue_response(exit_code=0)
+    checks = ["ruff_check", "ruff_check", "ruff_format", "mypy", "mypy", "syntax_check"]
+    llm.enqueue(
+        LLMResponse(
+            tool_calls=[
+                ToolCall(id=f"check-{i}", name="run_static_check", arguments={"check_name": check})
+                for i, check in enumerate(checks)
+            ],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    )
+    llm.enqueue(
+        LLMResponse(
+            content='{"status": "COMPLETED", "summary": "Done", "content": "Done"}',
+            stop_reason=StopReason.END_TURN,
+        )
+    )
+    agent = CoderAgent(
+        llm, sandbox, FakeWorkspaceDiff(diff="+x = 1", changed_files=["main.py"]), workspace
+    )
+    spec = PlanSpec(
+        task_id="missing-checkers", summary="Check", target_files=["main.py"], content="Spec"
+    )
+    changes = await agent.run(CoderInput(task_id="missing-checkers", spec=spec))
+    assert changes.status == "COMPLETED"
+    assert [command[0] for command in sandbox.executed_commands] == ["ruff", "mypy", "python"]
+    assert len(changes.known_limitations) == 2
+    assert any("'ruff'" in limitation for limitation in changes.known_limitations)
+    assert any("'mypy'" in limitation for limitation in changes.known_limitations)
+
+
 @pytest.mark.asyncio
 async def test_coder_agent_handles_llm_provider_error(workspace: Path) -> None:
     """Verify CoderAgent escalates gracefully when LLM provider throws error."""

@@ -1,6 +1,8 @@
 """Unit tests for Coder agent tools and security guards."""
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from oswald.core.tools.coder import (
     run_static_check,
     search_code,
 )
+from oswald.core.tools.coder.checks import ALLOWLISTED_COMMANDS, SAFE_CACHE_ENV
 
 
 @pytest.fixture
@@ -228,6 +231,69 @@ async def test_run_static_check_allowlist_and_forbids_tests(workspace: Path) -> 
     assert "PermissionDenied" in sh_res.output
 
     await fake_sandbox.stop()
+
+
+@pytest.mark.parametrize("check_name", ["ruff_check", "ruff_format", "mypy"])
+async def test_missing_optional_checker_is_skipped(workspace: Path, check_name: str) -> None:
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="missing-tool", workspace_path=workspace))
+    await sandbox.start()
+    executable = ALLOWLISTED_COMMANDS[check_name][0]
+    sandbox.queue_response(
+        exit_code=127,
+        stdout=f'OCI runtime exec failed: exec: "{executable}": executable file not found in $PATH',
+    )
+    result = await run_static_check(sandbox, check_name)
+    assert result.skipped
+    assert not result.passed
+    assert executable in result.output
+
+
+@pytest.mark.parametrize(
+    ("check_name", "output"),
+    [
+        ("ruff_check", "main.py:1: F401 unused import"),
+        ("mypy", "main.py:1: error: Incompatible types in assignment"),
+        ("syntax_check", "SyntaxError: invalid syntax"),
+        ("ruff_check", "error: Failed to parse configuration file"),
+    ],
+)
+async def test_checker_failures_are_not_skipped(
+    workspace: Path, check_name: str, output: str
+) -> None:
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="failed-check", workspace_path=workspace))
+    await sandbox.start()
+    sandbox.queue_response(exit_code=1, stderr=output)
+    result = await run_static_check(sandbox, check_name)
+    assert not result.skipped
+    assert not result.passed
+    assert result.output == output
+
+
+def test_syntax_check_keeps_bytecode_outside_workspace(workspace: Path) -> None:
+    command = [sys.executable, *ALLOWLISTED_COMMANDS["syntax_check"][1:]]
+    result = subprocess.run(  # noqa: S603
+        command,
+        cwd=workspace,
+        env={**os.environ, **SAFE_CACHE_ENV},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not list(workspace.rglob("__pycache__"))
+    assert not list(workspace.rglob("*.pyc"))
+
+    (workspace / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    result = subprocess.run(  # noqa: S603
+        command,
+        cwd=workspace,
+        env={**os.environ, **SAFE_CACHE_ENV},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "SyntaxError" in result.stdout + result.stderr
 
 
 def test_is_protected_and_is_test_path() -> None:

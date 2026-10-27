@@ -67,8 +67,10 @@ async def run(args: argparse.Namespace) -> int:
             planner = PlannerAdapter(PlannerAgent(client, root, model=settings.planner_model))
         return Agents(
             planner=planner,
-            coder=CoderAgent(client, sandbox, diff, root, model=settings.coder_model),
-            tester=TesterAgent(client, sandbox, root, model=settings.tester_model),
+            coder=CoderAgent(
+                client, sandbox, diff, root, model=settings.coder_model, max_turns=100
+            ),
+            tester=TesterAgent(client, sandbox, root, model=settings.tester_model, max_turns=100),
             reviewer=ReviewerAgent(client, model=settings.reviewer_model),
         )
 
@@ -79,12 +81,15 @@ async def run(args: argparse.Namespace) -> int:
         FileSystemArtifactStore(output_dir),
         agents,
         DockerSandboxRuntime,
-        image=args.image,
+        image=args.image or "python:3.12-slim",
         stage_timeout=args.stage_timeout,
         progress_interval=getattr(args, "progress_interval", 10),
     )
     if getattr(args, "task_id", None):
-        result = await orchestrator.continue_task(args.task_id)
+        if args.image is not None:
+            result = await orchestrator.continue_task(args.task_id, image=args.image)
+        else:
+            result = await orchestrator.continue_task(args.task_id)
     else:
         result = await orchestrator.run(args.request, base_ref=args.base_ref)
     print(result.model_dump_json(indent=2))
@@ -110,8 +115,8 @@ def main() -> int:
     parser.add_argument("--output", default=".oswald/runs")
     parser.add_argument(
         "--image",
-        default="python:3.12-slim",
-        help="Prebuilt image containing project/test dependencies",
+        default=None,
+        help="Prebuilt dependency image; new runs default to python:3.12-slim, continue reuses the saved image",
     )
     parser.add_argument("--stage-timeout", type=float, default=1800)
     parser.add_argument(

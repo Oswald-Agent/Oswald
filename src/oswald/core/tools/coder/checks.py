@@ -14,7 +14,15 @@ ALLOWLISTED_COMMANDS: dict[str, list[str]] = {
     "ruff_check": ["ruff", "check", "."],
     "ruff_format": ["ruff", "format", "--check", "."],
     "mypy": ["mypy", "."],
-    "syntax_check": ["python", "-m", "compileall", "-q", "."],
+    "syntax_check": [
+        "python",
+        "-X",
+        "pycache_prefix=/tmp/oswald-pycache",
+        "-m",
+        "compileall",
+        "-q",
+        ".",
+    ],
 }
 
 FORBIDDEN_KEYWORDS = {
@@ -45,6 +53,7 @@ class StaticCheckResult:
     passed: bool
     output: str
     duration_seconds: float
+    skipped: bool = False
 
 
 async def run_static_check(
@@ -119,6 +128,20 @@ async def run_static_check(
         )
 
     raw_output = f"{exec_res.stdout}\n{exec_res.stderr}".strip()
+    if (
+        exec_res.exit_code != 0
+        and cmd[0] in {"ruff", "mypy"}
+        and f'exec: "{cmd[0]}": executable file not found in $PATH' in raw_output
+    ):
+        return StaticCheckResult(
+            check_name=clean_name,
+            exit_code=exec_res.exit_code,
+            passed=False,
+            skipped=True,
+            output=f"Optional static checker '{cmd[0]}' is not installed in the sandbox; "
+            "checks using it were skipped.",
+            duration_seconds=exec_res.duration_seconds,
+        )
     return StaticCheckResult(
         check_name=check_name,
         exit_code=exec_res.exit_code,

@@ -106,7 +106,7 @@ class Orchestrator:
         RunProgress("", interval=progress_interval)
         self.progress_interval = progress_interval
 
-    async def continue_task(self, task_id: str) -> RunResult:
+    async def continue_task(self, task_id: str, *, image: str | None = None) -> RunResult:
         """Restore a finished invocation and retry its unfinished stage, without replanning."""
         if UUID(task_id).hex != task_id:
             raise ValueError("Expected the task ID printed by the orchestrator")
@@ -129,6 +129,8 @@ class Orchestrator:
         await asyncio.to_thread(
             shutil.copyfile, report_dir / "run.json", report_dir / f"run-{uuid4().hex}.json"
         )
+        if image is not None:
+            previous = previous.model_copy(update={"image": image})
         return await self._run(data.request, base_ref=data.base_commit, previous=previous)
 
     async def run(self, request: str, *, base_ref: str = "HEAD") -> RunResult:

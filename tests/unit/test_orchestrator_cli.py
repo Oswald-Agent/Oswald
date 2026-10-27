@@ -81,13 +81,14 @@ def test_cli_continue_requires_task_id(monkeypatch: pytest.MonkeyPatch) -> None:
     assert exc.value.code == 2
 
 
-async def test_cli_continue_dispatches_task_id(tmp_path: Path) -> None:
+@pytest.mark.parametrize("image", [None, "project:prepared"])
+async def test_cli_continue_dispatches_task_id(tmp_path: Path, image: str | None) -> None:
     args = argparse.Namespace(
         repo=str(tmp_path),
         output=str(tmp_path / "reports"),
         plan=None,
         planner=None,
-        image="python:3.12-slim",
+        image=image,
         stage_timeout=60,
         request="continue",
         task_id="abc",
@@ -96,5 +97,8 @@ async def test_cli_continue_dispatches_task_id(tmp_path: Path) -> None:
     with patch("oswald.cli.__main__.Orchestrator") as pipeline:
         pipeline.return_value.continue_task = AsyncMock(return_value=result)
         assert await run(args) == 0
-        pipeline.return_value.continue_task.assert_awaited_once_with("abc")
+        if image is None:
+            pipeline.return_value.continue_task.assert_awaited_once_with("abc")
+        else:
+            pipeline.return_value.continue_task.assert_awaited_once_with("abc", image=image)
         pipeline.return_value.run.assert_not_called()

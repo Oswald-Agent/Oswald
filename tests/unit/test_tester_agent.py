@@ -1,5 +1,6 @@
 """Unit tests for TesterAgent and its dedicated test tools."""
 
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -58,6 +59,169 @@ def _input(
 
 
 # --- write_test_file and isolation tests ---
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_long_test_output_preserves_final_summary_and_metrics(
+    workspace: Path, failed: bool
+) -> None:
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    await sandbox.start()
+    sandbox.queue_response(
+        exit_code=int(failed),
+        stderr="first-test ... ok\n"
+        + "verbose test detail ✓\n" * 1000
+        + "Ran 73 tests in 0.074s\n\n"
+        + ("FAILED (failures=1)" if failed else "OK"),
+    )
+    result = await execute_test_command(sandbox, ["python", "-m", "unittest", "discover", "-v"])
+    assert result.output.startswith("first-test ... ok")
+    assert "middle of command output omitted" in result.output
+    assert result.output.endswith("FAILED (failures=1)" if failed else "OK")
+    assert len(result.output.encode("utf-8")) <= 8192
+    assert TesterAgent._extract_metrics([result]) == (73, int(failed))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["python", "-m", "unittest", "discover", "2>&1"],
+        ["python", "-m", "unittest", "discover", "|", "grep", "OK"],
+        ["python", "-m", "unittest", ">results.txt"],
+        ["bash", "-c", "python -m unittest"],
+        ["pip", "install", "nicegui>=2.0.0"],
+        ["python", "-m", "pip", "install", "nicegui>=2.0.0"],
+    ],
+)
+async def test_invalid_commands_never_execute_or_become_test_results(
+    workspace: Path, command: list[str]
+) -> None:
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    await sandbox.start()
+    agent = TesterAgent(FakeLLMClient(), sandbox, workspace)
+    output, success, result = await agent._execute_tool(
+        ToolCall(id="invalid", name="run_test_command", arguments={"command": command}), set()
+    )
+    assert not success and result is None
+    assert "PermissionDenied" in output
+    assert sandbox.executed_commands == []
+
+
+@pytest.mark.parametrize("change_workspace", [False, True])
+async def test_unchanged_passing_suite_reuses_evidence_and_requests_report(
+    workspace: Path, change_workspace: bool
+) -> None:
+    llm = FakeLLMClient()
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    await sandbox.start()
+    for _ in range(2):
+        sandbox.queue_response(stdout="Ran 2 tests in 0.001s\n\nOK")
+    suite = ToolCall(
+        id="suite", name="run_test_command", arguments={"command": ["python", "-m", "unittest"]}
+    )
+    llm.enqueue(LLMResponse(tool_calls=[suite], stop_reason=StopReason.TOOL_USE))
+    if change_workspace:
+        llm.enqueue(
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="write",
+                        name="write_test_file",
+                        arguments={
+                            "file_path": "test_app.py",
+                            "old_str": "",
+                            "new_str": "# updated tests\n",
+                        },
+                    )
+                ],
+                stop_reason=StopReason.TOOL_USE,
+            )
+        )
+    llm.enqueue(LLMResponse(tool_calls=[suite], stop_reason=StopReason.TOOL_USE))
+    llm.enqueue_text('{"status": "COMPLETED", "content": "Existing evidence reported."}')
+    result = await TesterAgent(llm, sandbox, workspace).run(_input())
+    assert result.passed and result.tests_run == 2
+    assert len(sandbox.executed_commands) == (2 if change_workspace else 1)
+    assert bool(llm.requests[-1].tools) is change_workspace
+
+
+@pytest.mark.parametrize("suite_exit_code", [0, 1])
+async def test_tester_reserves_final_turn_for_report(workspace: Path, suite_exit_code: int) -> None:
+    llm = FakeLLMClient()
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    await sandbox.start()
+    sandbox.queue_response(
+        exit_code=suite_exit_code,
+        stdout="Ran 1 test in 0.001s\n\n"
+        + ("OK" if suite_exit_code == 0 else "FAILED (failures=1)"),
+    )
+    llm.enqueue(
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="suite",
+                    name="run_test_command",
+                    arguments={"command": ["python", "-m", "unittest", "discover", "-v"]},
+                )
+            ],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    )
+    llm.enqueue(
+        LLMResponse(content='{"status": "COMPLETED", "content": "Suite results reported."}')
+    )
+    agent = TesterAgent(llm, sandbox, workspace, max_turns=2)
+    result = await agent.run(_input())
+    assert result.passed is (suite_exit_code == 0)
+    assert result.exit_code == suite_exit_code
+    assert result.tests_run == 1
+    assert llm.requests[0].tools
+    assert llm.requests[-1].tools == []
+    assert "reserved for reporting" in llm.requests[-1].messages[-1].content
+    assert len(sandbox.executed_commands) == 1
+
+
+async def test_tester_final_turn_cannot_run_tools_or_claim_unexecuted_tests(
+    workspace: Path,
+) -> None:
+    llm = FakeLLMClient()
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    await sandbox.start()
+    llm.enqueue(
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="late-suite", name="run_test_command", arguments={"command": ["pytest"]}
+                )
+            ],
+            stop_reason=StopReason.TOOL_USE,
+        )
+    )
+    result = await TesterAgent(llm, sandbox, workspace, max_turns=1).run(_input())
+    assert not result.passed
+    assert "final reporting turn" in result.content
+    assert not sandbox.executed_commands
+
+
+async def test_test_commands_do_not_create_workspace_bytecode(workspace: Path) -> None:
+    (workspace / "test_app.py").write_text(
+        "import unittest\nimport app\n"
+        "class GreetingTest(unittest.TestCase):\n"
+        "    def test_greet(self):\n"
+        "        self.assertEqual(app.greet(), 'hello')\n",
+        encoding="utf-8",
+    )
+    sandbox = FakeSandboxRuntime(
+        SandboxConfig(task_id="tester-1", workspace_path=workspace), execute_locally=True
+    )
+    await sandbox.start()
+    result = await execute_test_command(
+        sandbox, [sys.executable, "-m", "unittest", "discover", "-v"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Ran 1 test" in result.output
+    assert not list(workspace.rglob("__pycache__"))  # noqa: ASYNC240
+    assert not list(workspace.rglob("*.pyc"))  # noqa: ASYNC240
 
 
 def test_write_test_file_allows_test_conventions_and_blocks_source(workspace: Path) -> None:

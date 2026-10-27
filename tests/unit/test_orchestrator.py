@@ -594,16 +594,20 @@ async def test_continue_sandbox_failure_keeps_resume_stage(repo: Path, tmp_path:
     assert continued.status == "SUCCEEDED" and h.events == ["reviewer"]
 
 
-async def test_continue_remembers_repo_and_image(repo: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("override_image", [None, "project:prepared"])
+async def test_continue_remembers_repo_and_image(
+    repo: Path, tmp_path: Path, override_image: str | None
+) -> None:
     h = Harness(repo, tmp_path / "reports")
     h.pipeline.image = "project:test"
     h.crash = "tester"
     result = await h.pipeline.run("Fix")
     h.crash = ""
     h.pipeline = Orchestrator(tmp_path / "wrong-repo", h.output, h.store, h.factory, h.sandbox)
-    continued = await h.pipeline.continue_task(result.task_id)
+    continued = await h.pipeline.continue_task(result.task_id, image=override_image)
     assert continued.status == "SUCCEEDED"
-    assert h.runtime and h.runtime.config.image == "project:test"
+    assert h.runtime and h.runtime.config.image == (override_image or "project:test")
+    assert continued.image == (override_image or "project:test")
 
 
 async def test_continue_legacy_report_and_pinned_commit(repo: Path, tmp_path: Path) -> None:

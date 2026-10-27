@@ -31,6 +31,10 @@ You are the **Tester Agent** in the OSWALD deterministic software development pi
    - You MUST execute at least one test command via `run_test_command` before concluding.
    - Always invoke commands as direct argument vectors (e.g. `["pytest", "tests/test_feature.py"]`). Never attempt shell string invocations or chaining (`&&`, `|`, `;`).
    - After a valid suite run, return the completion report promptly. Do not run mutation-testing scripts or build contrived broken implementations for this minimal pipeline. Inline Python probes (`python -c`) are diagnostics, not test suite runs.
+   - The final turn is reserved for the completion report and has no tools. Use
+     the collected evidence to report results; do not request another command.
+   - If you repeat a passing command without changing workspace files, its saved
+     evidence is reused and the next turn is reserved for reporting.
    - Never claim tests passed unless the test runner exited cleanly with exit code 0.
 
 4. **Honest Reporting & Escalation (D6)**:

@@ -35,6 +35,7 @@ from oswald.core.tools.coder import (
     run_static_check,
     search_code,
 )
+from oswald.core.tools.coder.checks import ALLOWLISTED_COMMANDS
 from oswald.core.vcs.workspace import WorkspaceDiff
 
 logger = structlog.get_logger(component="agent.coder")
@@ -142,6 +143,7 @@ class CoderAgent:
         self.max_turns = max_turns
         self.max_schema_retries = max_schema_retries
         self.prompt_path = prompt_path or _DEFAULT_PROMPT_PATH
+        self._unavailable_static_tools: dict[str, str] = {}
 
     def _load_system_prompt(self) -> str:
         if self.prompt_path.is_file():
@@ -257,8 +259,29 @@ class CoderAgent:
                 return res.message, res.success
 
             elif name == "run_static_check":
-                check_name = str(args.get("check_name") or "")
+                check_name = str(args.get("check_name") or "").strip().lower()
+                command = ALLOWLISTED_COMMANDS.get(check_name)
+                executable = command[0] if command else ""
+                if executable in self._unavailable_static_tools:
+                    return (
+                        f"Check: {check_name} | SKIPPED (not passed). "
+                        f"{self._unavailable_static_tools[executable]} "
+                        "Do not retry this checker. If implementation and available checks are "
+                        "complete, return completion JSON now and hand off to Tester.",
+                        True,
+                    )
                 check_res = await run_static_check(self.sandbox, check_name)
+                if check_res.skipped:
+                    self._unavailable_static_tools[executable] = check_res.output
+                    logger.warning(
+                        "coder.static_check_skipped", check=check_name, reason=check_res.output
+                    )
+                    return (
+                        f"Check: {check_name} | SKIPPED (not passed). {check_res.output} "
+                        "Do not retry this checker or install dependencies. Run any remaining "
+                        "available checks, then return completion JSON and hand off to Tester.",
+                        True,
+                    )
                 return (
                     f"Check: {check_res.check_name} | Passed: {check_res.passed} (exit {check_res.exit_code})\n{check_res.output}",
                     check_res.passed,
@@ -481,6 +504,7 @@ class CoderAgent:
                 diff="",
                 content=final_draft.get("content", "# Escalation"),
                 escalation=final_draft.get("escalation", "Escalated by Coder agent"),
+                known_limitations=list(self._unavailable_static_tools.values()),
             )
             await self.event_sink.emit(
                 RunEvent(
@@ -564,7 +588,8 @@ class CoderAgent:
             diff=diff,
             content=final_draft.get("content", "# Implementation Notes"),
             deviations=deviations,
-            known_limitations=list(final_draft.get("known_limitations", [])),
+            known_limitations=list(final_draft.get("known_limitations", []))
+            + list(self._unavailable_static_tools.values()),
             test_attention=list(final_draft.get("test_attention", [])),
             dependency_changes=protected_touched,
         )

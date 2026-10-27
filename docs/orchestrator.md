@@ -215,7 +215,9 @@ uv run python -m oswald.cli continue <task-id>
 
 Use the same `--output` directory (default `.oswald/runs`). New runs remember
 the source repository and sandbox image automatically. For older runs, supply
-the original `--repo` and `--image`. The command restores the saved patch on the original base
+the original `--repo` and `--image`. An explicit `--image` overrides the saved image
+when resuming, for example after preparing missing dependencies on the host.
+The command restores the saved patch on the original base
 commit and keeps the same task ID. A failed Tester resumes at Tester; a failed
 Reviewer reuses the saved passing/failing test report and resumes at Reviewer.
 Completed Planner and Coder outputs are reused. The unfinished agent starts a new
