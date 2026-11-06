@@ -55,6 +55,17 @@ htmlcov/
 *.swo
 *~
 
+# AI Agent tooling & configs
+.agents/
+.claude/
+.cursor/
+.windsurf/
+commands/
+skills-lock.json
+
+# Local runtime artifacts
+.oswald/
+
 # Operating System
 .DS_Store
 Thumbs.db

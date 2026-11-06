@@ -82,6 +82,7 @@ async def run(args: argparse.Namespace) -> int:
         agents,
         DockerSandboxRuntime,
         image=args.image or "python:3.12-slim",
+        network_disabled=not getattr(args, "allow_network", False),
         stage_timeout=args.stage_timeout,
         progress_interval=getattr(args, "progress_interval", 10),
     )
@@ -117,6 +118,11 @@ def main() -> int:
         "--image",
         default=None,
         help="Prebuilt dependency image; new runs default to python:3.12-slim, continue reuses the saved image",
+    )
+    parser.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="Allow outbound network access from sandbox container (default: offline / --network none)",
     )
     parser.add_argument("--stage-timeout", type=float, default=1800)
     parser.add_argument(

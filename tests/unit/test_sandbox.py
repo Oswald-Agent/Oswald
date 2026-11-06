@@ -54,6 +54,7 @@ def test_sandbox_config_defaults(tmp_path: Path) -> None:
     assert cfg.max_head_bytes == 2 * 1024 * 1024
     assert cfg.max_tail_bytes == 3 * 1024 * 1024
     assert cfg.max_total_output_bytes == 200 * 1024 * 1024
+    assert cfg.report_dir is None
 
 
 def test_sandbox_config_invalid_task_id(tmp_path: Path) -> None:
@@ -202,6 +203,95 @@ async def test_docker_sandbox_start_cancellation_cleans_up(
 
     assert runtime.status == SandboxStatus.FAILED
     assert any("rm" in c and "-f" in c and runtime.container_name in c for c in calls)
+
+
+async def test_docker_sandbox_masks_git_directory_with_tmpfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker runtime masks /workspace/.git with a read-only tmpfs mount when absent or a directory."""
+    workspace = tmp_path / "workspace_dir"
+    workspace.mkdir()
+    config = SandboxConfig(task_id="task-mask-dir", workspace_path=workspace)
+    runtime = DockerSandboxRuntime(config=config)
+
+    calls: list[list[str]] = []
+
+    async def mock_run_docker(args: object, **kwargs: object) -> tuple[int, str, str]:
+        if isinstance(args, (list, tuple)):
+            calls.append(list(args))
+        return 0, "", ""
+
+    monkeypatch.setattr(runtime, "_run_docker", mock_run_docker)
+    await runtime.start()
+
+    run_cmd = next(c for c in calls if c[0] == "run")
+    assert "--tmpfs" in run_cmd
+    tmpfs_idx = run_cmd.index("--tmpfs")
+    assert "/workspace/.git:ro" in run_cmd[tmpfs_idx:]
+
+    # Also test when .git is an existing directory
+    git_dir = workspace / ".git"
+    git_dir.mkdir()
+    calls.clear()
+    await runtime.start()
+    run_cmd_dir = next(c for c in calls if c[0] == "run")
+    assert "/workspace/.git:ro" in run_cmd_dir
+
+
+async def test_docker_sandbox_masks_git_worktree_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker runtime masks worktree pointer file with read-only /dev/null bind mount."""
+    workspace = tmp_path / "workspace_wt"
+    workspace.mkdir()
+    (workspace / ".git").write_text("gitdir: /host/repo/.git/worktrees/wt\n")
+    config = SandboxConfig(task_id="task-mask-file", workspace_path=workspace)
+    runtime = DockerSandboxRuntime(config=config)
+
+    calls: list[list[str]] = []
+
+    async def mock_run_docker(args: object, **kwargs: object) -> tuple[int, str, str]:
+        if isinstance(args, (list, tuple)):
+            calls.append(list(args))
+        return 0, "", ""
+
+    monkeypatch.setattr(runtime, "_run_docker", mock_run_docker)
+    await runtime.start()
+
+    run_cmd = next(c for c in calls if c[0] == "run")
+    assert "-v" in run_cmd
+    assert "/dev/null:/workspace/.git:ro" in run_cmd
+
+
+async def test_docker_sandbox_exec_command_uses_report_dir_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """exec_command directs StreamCollector to report_dir / logs when report_dir is configured."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    report_dir = tmp_path / "reports" / "task-logs"
+    report_dir.mkdir(parents=True)
+    config = SandboxConfig(
+        task_id="task-logs",
+        workspace_path=workspace,
+        report_dir=report_dir,
+    )
+    runtime = DockerSandboxRuntime(config=config)
+    runtime._status = SandboxStatus.RUNNING
+
+    captured_logs_dir: Path | None = None
+
+    async def mock_run_docker(args: object, **kwargs: object) -> tuple[int, str, str]:
+        nonlocal captured_logs_dir
+        captured_logs_dir = kwargs.get("logs_dir")  # type: ignore[assignment]
+        return 0, "output", ""
+
+    monkeypatch.setattr(runtime, "_run_docker", mock_run_docker)
+    monkeypatch.setattr(runtime, "is_running", AsyncMock(return_value=True))
+
+    res = await runtime.exec_command(["echo", "hello"])
+    assert res.exit_code == 0
+    assert captured_logs_dir == report_dir / "logs"
 
 
 def test_stream_collector_small_output(tmp_path: Path) -> None:

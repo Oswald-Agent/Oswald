@@ -71,6 +71,10 @@ class SandboxConfig(BaseModel):
         default=200 * 1024 * 1024,  # 200 MiB
         description="Maximum allowed total stdout/stderr bytes written to disk before aborting",
     )
+    report_dir: Path | None = Field(
+        default=None,
+        description="Host directory for task run reports and direct execution logs",
+    )
 
 
 class ExecResult(BaseModel):

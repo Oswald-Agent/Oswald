@@ -339,7 +339,18 @@ class DockerSandboxRuntime:
             run_args.extend(["--user", self._config.user])
 
         for path, opts in self._config.tmpfs_mounts.items():
-            run_args.extend(["--tmpfs", f"{path}:{opts}"])
+            if path != "/workspace/.git":
+                run_args.extend(["--tmpfs", f"{path}:{opts}"])
+
+        # Mask /workspace/.git to eliminate host Git hook tampering (SEC-02).
+        # In a git worktree, /workspace/.git is a pointer file; mounting tmpfs directly
+        # onto a file fails in runc with ENOTDIR. For files, mask with a read-only bind mount
+        # of /dev/null. When .git is a directory or absent, mask with an empty read-only tmpfs.
+        git_target = self._workspace_path / ".git"
+        if git_target.is_file():
+            run_args.extend(["-v", "/dev/null:/workspace/.git:ro"])
+        else:
+            run_args.extend(["--tmpfs", "/workspace/.git:ro"])
 
         # Base image and keep-alive command
         run_args.extend([self._config.image, "sleep", "infinity"])
@@ -389,12 +400,17 @@ class DockerSandboxRuntime:
         exec_args.extend(cmd)
 
         start_time = time.perf_counter()
+        logs_dir = (
+            self._config.report_dir / "logs"
+            if self._config.report_dir is not None
+            else self._workspace_path / ".oswald" / "logs"
+        )
         try:
             exit_code, stdout, stderr = await self._run_docker(
                 exec_args,
                 timeout_seconds=timeout_seconds,
                 check=False,
-                logs_dir=self._workspace_path / ".oswald" / "logs",
+                logs_dir=logs_dir,
             )
         except (SandboxTimeoutError, SandboxError, asyncio.CancelledError) as exc:
             await self._run_docker(["kill", self.container_name], check=False)
