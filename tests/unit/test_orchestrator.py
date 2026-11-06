@@ -638,3 +638,31 @@ async def test_continue_legacy_report_and_pinned_commit(repo: Path, tmp_path: Pa
     assert h.events == ["tester", "reviewer"]
     assert (repo / "app.py").read_text() == "value = 999\n"
     assert "-value = 1" in Path(continued.patch_path).read_text()
+
+
+async def test_orchestrator_network_disabled_default(repo: Path, tmp_path: Path) -> None:
+    h = Harness(repo, tmp_path / "reports")
+    assert h.pipeline.network_disabled is True
+    result = await h.pipeline.run("Fix")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+    assert h.runtime.config.network_disabled is True
+
+
+@pytest.mark.parametrize("network_disabled", [True, False])
+async def test_orchestrator_forwards_network_disabled_to_sandbox(
+    repo: Path, tmp_path: Path, network_disabled: bool
+) -> None:
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline = Orchestrator(
+        repo,
+        h.output,
+        h.store,
+        h.factory,
+        h.sandbox,
+        network_disabled=network_disabled,
+    )
+    result = await h.pipeline.run("Fix")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+    assert h.runtime.config.network_disabled is network_disabled

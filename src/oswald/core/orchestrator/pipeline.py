@@ -90,6 +90,7 @@ class Orchestrator:
         sandbox: Callable[[SandboxConfig], SandboxRuntime],
         *,
         image: str = "python:3.12-slim",
+        network_disabled: bool = True,
         stage_timeout: float = 1800,
         progress_interval: float = 10,
     ) -> None:
@@ -101,6 +102,7 @@ class Orchestrator:
         self.agents = agents
         self.sandbox = sandbox
         self.image = image
+        self.network_disabled = network_disabled
         self.stage_timeout = stage_timeout
         # Validate before allocating a workspace or starting a run.
         RunProgress("", interval=progress_interval)
@@ -261,7 +263,14 @@ class Orchestrator:
                     await call(manager.apply_patch(task_id, target))
             workspace_restored = True
             stage = "sandbox"
-            runtime = self.sandbox(SandboxConfig(task_id=task_id, workspace_path=root, image=image))
+            runtime = self.sandbox(
+                SandboxConfig(
+                    task_id=task_id,
+                    workspace_path=root,
+                    image=image,
+                    network_disabled=self.network_disabled,
+                )
+            )
             await call(runtime.start())
             diff = WorktreeWorkspaceDiff(manager)
             stage = "planner"

@@ -25,6 +25,15 @@ def test_cli_defaults_to_real_planner(monkeypatch: pytest.MonkeyPatch) -> None:
     args = execute.call_args.args[0]
     assert args.plan is None and args.planner is None
     assert args.stage_timeout == 1800
+    assert args.allow_network is False
+
+
+def test_cli_allow_network_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["oswald", "Do something", "--allow-network"])
+    with patch("oswald.cli.__main__.run", new_callable=AsyncMock, return_value=0) as execute:
+        assert main() == 0
+    args = execute.call_args.args[0]
+    assert args.allow_network is True
 
 
 @pytest.mark.parametrize("success", [True, False])
@@ -102,3 +111,25 @@ async def test_cli_continue_dispatches_task_id(tmp_path: Path, image: str | None
         else:
             pipeline.return_value.continue_task.assert_awaited_once_with("abc", image=image)
         pipeline.return_value.run.assert_not_called()
+
+
+@pytest.mark.parametrize("allow_network, expected_network_disabled", [(False, True), (True, False)])
+async def test_cli_forwards_allow_network_to_orchestrator(
+    tmp_path: Path, allow_network: bool, expected_network_disabled: bool
+) -> None:
+    args = argparse.Namespace(
+        repo=str(tmp_path),
+        output=str(tmp_path / "reports"),
+        plan=None,
+        planner=None,
+        image=None,
+        stage_timeout=60,
+        request="Test task",
+        base_ref="HEAD",
+        allow_network=allow_network,
+    )
+    result = RunResult(task_id="abc", status="SUCCEEDED", stage="reviewer", reason="ok", attempts=1)
+    with patch("oswald.cli.__main__.Orchestrator") as pipeline:
+        pipeline.return_value.run = AsyncMock(return_value=result)
+        assert await run(args) == 0
+        assert pipeline.call_args.kwargs["network_disabled"] is expected_network_disabled
