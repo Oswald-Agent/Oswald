@@ -204,6 +204,64 @@ async def test_docker_sandbox_start_cancellation_cleans_up(
     assert any("rm" in c and "-f" in c and runtime.container_name in c for c in calls)
 
 
+async def test_docker_sandbox_masks_git_directory_with_tmpfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker runtime masks /workspace/.git with a read-only tmpfs mount when absent or a directory."""
+    workspace = tmp_path / "workspace_dir"
+    workspace.mkdir()
+    config = SandboxConfig(task_id="task-mask-dir", workspace_path=workspace)
+    runtime = DockerSandboxRuntime(config=config)
+
+    calls: list[list[str]] = []
+
+    async def mock_run_docker(args: object, **kwargs: object) -> tuple[int, str, str]:
+        if isinstance(args, (list, tuple)):
+            calls.append(list(args))
+        return 0, "", ""
+
+    monkeypatch.setattr(runtime, "_run_docker", mock_run_docker)
+    await runtime.start()
+
+    run_cmd = next(c for c in calls if c[0] == "run")
+    assert "--tmpfs" in run_cmd
+    tmpfs_idx = run_cmd.index("--tmpfs")
+    assert "/workspace/.git:ro" in run_cmd[tmpfs_idx:]
+
+    # Also test when .git is an existing directory
+    git_dir = workspace / ".git"
+    git_dir.mkdir()
+    calls.clear()
+    await runtime.start()
+    run_cmd_dir = next(c for c in calls if c[0] == "run")
+    assert "/workspace/.git:ro" in run_cmd_dir
+
+
+async def test_docker_sandbox_masks_git_worktree_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker runtime masks worktree pointer file with read-only /dev/null bind mount."""
+    workspace = tmp_path / "workspace_wt"
+    workspace.mkdir()
+    (workspace / ".git").write_text("gitdir: /host/repo/.git/worktrees/wt\n")
+    config = SandboxConfig(task_id="task-mask-file", workspace_path=workspace)
+    runtime = DockerSandboxRuntime(config=config)
+
+    calls: list[list[str]] = []
+
+    async def mock_run_docker(args: object, **kwargs: object) -> tuple[int, str, str]:
+        if isinstance(args, (list, tuple)):
+            calls.append(list(args))
+        return 0, "", ""
+
+    monkeypatch.setattr(runtime, "_run_docker", mock_run_docker)
+    await runtime.start()
+
+    run_cmd = next(c for c in calls if c[0] == "run")
+    assert "-v" in run_cmd
+    assert "/dev/null:/workspace/.git:ro" in run_cmd
+
+
 def test_stream_collector_small_output(tmp_path: Path) -> None:
     """Small output <= max_head + max_tail is returned in full and preserved on disk."""
     logs_dir = tmp_path / ".oswald" / "logs"

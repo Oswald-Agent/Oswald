@@ -339,7 +339,18 @@ class DockerSandboxRuntime:
             run_args.extend(["--user", self._config.user])
 
         for path, opts in self._config.tmpfs_mounts.items():
-            run_args.extend(["--tmpfs", f"{path}:{opts}"])
+            if path != "/workspace/.git":
+                run_args.extend(["--tmpfs", f"{path}:{opts}"])
+
+        # Mask /workspace/.git to eliminate host Git hook tampering (SEC-02).
+        # In a git worktree, /workspace/.git is a pointer file; mounting tmpfs directly
+        # onto a file fails in runc with ENOTDIR. For files, mask with a read-only bind mount
+        # of /dev/null. When .git is a directory or absent, mask with an empty read-only tmpfs.
+        git_target = self._workspace_path / ".git"
+        if git_target.is_file():
+            run_args.extend(["-v", "/dev/null:/workspace/.git:ro"])
+        else:
+            run_args.extend(["--tmpfs", "/workspace/.git:ro"])
 
         # Base image and keep-alive command
         run_args.extend([self._config.image, "sleep", "infinity"])
