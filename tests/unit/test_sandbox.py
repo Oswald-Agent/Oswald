@@ -54,6 +54,7 @@ def test_sandbox_config_defaults(tmp_path: Path) -> None:
     assert cfg.max_head_bytes == 2 * 1024 * 1024
     assert cfg.max_tail_bytes == 3 * 1024 * 1024
     assert cfg.max_total_output_bytes == 200 * 1024 * 1024
+    assert cfg.report_dir is None
 
 
 def test_sandbox_config_invalid_task_id(tmp_path: Path) -> None:
@@ -260,6 +261,37 @@ async def test_docker_sandbox_masks_git_worktree_file(
     run_cmd = next(c for c in calls if c[0] == "run")
     assert "-v" in run_cmd
     assert "/dev/null:/workspace/.git:ro" in run_cmd
+
+
+async def test_docker_sandbox_exec_command_uses_report_dir_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """exec_command directs StreamCollector to report_dir / logs when report_dir is configured."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    report_dir = tmp_path / "reports" / "task-logs"
+    report_dir.mkdir(parents=True)
+    config = SandboxConfig(
+        task_id="task-logs",
+        workspace_path=workspace,
+        report_dir=report_dir,
+    )
+    runtime = DockerSandboxRuntime(config=config)
+    runtime._status = SandboxStatus.RUNNING
+
+    captured_logs_dir: Path | None = None
+
+    async def mock_run_docker(args: object, **kwargs: object) -> tuple[int, str, str]:
+        nonlocal captured_logs_dir
+        captured_logs_dir = kwargs.get("logs_dir")  # type: ignore[assignment]
+        return 0, "output", ""
+
+    monkeypatch.setattr(runtime, "_run_docker", mock_run_docker)
+    monkeypatch.setattr(runtime, "is_running", AsyncMock(return_value=True))
+
+    res = await runtime.exec_command(["echo", "hello"])
+    assert res.exit_code == 0
+    assert captured_logs_dir == report_dir / "logs"
 
 
 def test_stream_collector_small_output(tmp_path: Path) -> None:

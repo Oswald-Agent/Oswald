@@ -666,3 +666,34 @@ async def test_orchestrator_forwards_network_disabled_to_sandbox(
     assert result.status == "SUCCEEDED"
     assert h.runtime is not None
     assert h.runtime.config.network_disabled is network_disabled
+
+
+async def test_orchestrator_forwards_report_dir_to_sandbox(repo: Path, tmp_path: Path) -> None:
+    h = Harness(repo, tmp_path / "reports")
+    result = await h.pipeline.run("Fix")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+    assert h.runtime.config.report_dir == h.output / result.task_id
+
+
+async def test_orchestrator_cleanup_ignores_workspace_oswald_logs(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Orchestrator cleanup does not copy workspace logs, avoiding symlink traversal."""
+    h = Harness(repo, tmp_path / "reports")
+
+    def custom_factory(root: Path, sandbox: SandboxRuntime, diff: WorkspaceDiff) -> Agents:
+        untrusted_target = tmp_path / "untrusted_file"
+        untrusted_target.write_text("secret_host_content")
+        malicious_logs = root / ".oswald" / "logs"
+        malicious_logs.mkdir(parents=True, exist_ok=True)
+        (malicious_logs / "leaked.txt").symlink_to(untrusted_target)
+        return h.factory(root, sandbox, diff)
+
+    h.pipeline = Orchestrator(repo, h.output, h.store, custom_factory, h.sandbox)
+    result = await h.pipeline.run("Fix")
+    assert result.status == "SUCCEEDED"
+    report_dir = h.output / result.task_id
+    # Ensure malicious symlink was NOT copied to report_dir / logs
+    copied_link = report_dir / "logs" / "leaked.txt"
+    assert not copied_link.exists()

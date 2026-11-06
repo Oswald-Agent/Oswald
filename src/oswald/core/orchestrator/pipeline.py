@@ -269,6 +269,7 @@ class Orchestrator:
                     workspace_path=root,
                     image=image,
                     network_disabled=self.network_disabled,
+                    report_dir=report_dir,
                 )
             )
             await call(runtime.start())
@@ -410,15 +411,6 @@ class Orchestrator:
                 )
             if root is not None and manager is not None and workspace_restored:
                 try:
-                    logs = root / ".oswald" / "logs"
-                    if await asyncio.to_thread(logs.is_dir):
-                        await asyncio.to_thread(
-                            shutil.copytree,
-                            logs,
-                            report_dir / "logs",
-                            symlinks=True,
-                            dirs_exist_ok=True,
-                        )
                     final_diff = await call(manager.get_diff(task_id))
                     target = report_dir / "final.patch"
                     await asyncio.to_thread(target.write_text, final_diff.diff, encoding="utf-8")

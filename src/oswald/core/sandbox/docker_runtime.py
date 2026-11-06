@@ -400,12 +400,17 @@ class DockerSandboxRuntime:
         exec_args.extend(cmd)
 
         start_time = time.perf_counter()
+        logs_dir = (
+            self._config.report_dir / "logs"
+            if self._config.report_dir is not None
+            else self._workspace_path / ".oswald" / "logs"
+        )
         try:
             exit_code, stdout, stderr = await self._run_docker(
                 exec_args,
                 timeout_seconds=timeout_seconds,
                 check=False,
-                logs_dir=self._workspace_path / ".oswald" / "logs",
+                logs_dir=logs_dir,
             )
         except (SandboxTimeoutError, SandboxError, asyncio.CancelledError) as exc:
             await self._run_docker(["kill", self.container_name], check=False)
