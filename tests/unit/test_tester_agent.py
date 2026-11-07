@@ -963,6 +963,55 @@ async def test_zero_tests_and_diagnostics_cannot_pass(workspace: Path, diagnosti
     assert result.tests_run == 0
 
 
+async def test_tester_passed_evaluation_requires_positive_test_counts_and_zero_failures(
+    workspace: Path,
+) -> None:
+    llm = FakeLLMClient()
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    sandbox.queue_response(exit_code=0, stdout="No tests found\n")
+    await sandbox.start()
+    llm.enqueue(
+        LLMResponse(
+            stop_reason=StopReason.TOOL_USE,
+            tool_calls=[
+                ToolCall(
+                    id="run",
+                    name="run_test_command",
+                    arguments={"command": ["pytest"]},
+                )
+            ],
+        )
+    )
+    llm.enqueue_text('{"status": "COMPLETED", "content": "Done"}')
+    result = await TesterAgent(llm, sandbox, workspace).run(_input())
+    assert result.passed is False
+    assert result.exit_code != 0
+    assert result.tests_run == 0
+
+    llm2 = FakeLLMClient()
+    sandbox2 = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    sandbox2.queue_response(exit_code=0, stdout="Ran 5 tests in 0.05s\nFAILED (failures=2)")
+    await sandbox2.start()
+    llm2.enqueue(
+        LLMResponse(
+            stop_reason=StopReason.TOOL_USE,
+            tool_calls=[
+                ToolCall(
+                    id="run",
+                    name="run_test_command",
+                    arguments={"command": ["python", "-m", "unittest"]},
+                )
+            ],
+        )
+    )
+    llm2.enqueue_text('{"status": "COMPLETED", "content": "Done"}')
+    result2 = await TesterAgent(llm2, sandbox2, workspace).run(_input())
+    assert result2.passed is False
+    assert result2.exit_code != 0
+    assert result2.tests_run == 5
+    assert result2.tests_failed == 2
+
+
 @pytest.mark.parametrize(
     "output,expected",
     [

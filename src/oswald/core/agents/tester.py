@@ -688,14 +688,22 @@ class TesterAgent:
         # 2. All final/latest distinct test commands must have exited cleanly with 0.
         # 3. No unauthorized non-test mutations were detected.
         # 4. Final completion status must be COMPLETED.
+        # 5. Tests were executed (tests_run > 0) with zero failures (tests_failed == 0).
         has_commands = bool(commands)
         all_latest_clean = has_commands and all(
             res.exit_code == 0 for res in latest_commands.values()
         )
         no_unauthorized_mutations = not bool(changed)
         is_completed = (final_draft or {}).get("status") == "COMPLETED"
+        valid_test_metrics = tests_run > 0 and tests_failed == 0
 
-        passed = has_commands and all_latest_clean and no_unauthorized_mutations and is_completed
+        passed = (
+            has_commands
+            and all_latest_clean
+            and no_unauthorized_mutations
+            and is_completed
+            and valid_test_metrics
+        )
 
         # Exit code determination
         if passed:
