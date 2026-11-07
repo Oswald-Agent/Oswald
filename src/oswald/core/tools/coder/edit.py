@@ -34,6 +34,7 @@ class EditResult:
     message: str
     is_protected: bool = False
     is_new_file: bool = False
+    is_deleted: bool = False
 
 
 def is_test_path(rel_path: str) -> bool:
@@ -74,11 +75,13 @@ def is_protected_path(rel_path: str) -> bool:
 def edit_file(
     workspace_root: Path,
     file_path: str,
-    old_str: str,
-    new_str: str,
-    target_files_whitelist: list[str],
+    old_str: str = "",
+    new_str: str = "",
+    target_files_whitelist: list[str] | None = None,
+    *,
+    delete: bool = False,
 ) -> EditResult:
-    """Surgically modify or create a file inside the task worktree.
+    """Surgically modify, create, or delete a file inside the task worktree.
 
     Guards enforced:
         1. Whitelist guard: file_path must be in target_files_whitelist.
@@ -96,7 +99,8 @@ def edit_file(
         )
 
     clean_whitelist = [
-        normalize_workspace_rel_path(workspace_root, f) for f in target_files_whitelist
+        normalize_workspace_rel_path(workspace_root, f)
+        for f in (target_files_whitelist if target_files_whitelist is not None else [])
     ]
 
     # Guard 1: Whitelist check
@@ -132,6 +136,39 @@ def edit_file(
             success=False,
             file_path=clean_path,
             message=f"SecurityError: {exc}",
+        )
+
+    # Explicit file deletion
+    if delete:
+        if not target.exists():
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=f"Error: File '{clean_path}' does not exist to be deleted.",
+                is_protected=is_protected,
+            )
+        if not target.is_file():
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=f"Error: '{clean_path}' is not a file to be deleted.",
+                is_protected=is_protected,
+            )
+        try:
+            target.unlink()
+        except OSError as exc:
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=f"FileSystemError deleting file '{clean_path}': {exc}",
+                is_protected=is_protected,
+            )
+        return EditResult(
+            success=True,
+            file_path=clean_path,
+            message=f"Successfully deleted file '{clean_path}'",
+            is_protected=is_protected,
+            is_deleted=True,
         )
 
     # Surgical replacement or creation
@@ -210,4 +247,20 @@ def edit_file(
         message=f"Successfully updated '{clean_path}'",
         is_protected=is_protected,
         is_new_file=False,
+    )
+
+
+def delete_file(
+    workspace_root: Path,
+    file_path: str,
+    target_files_whitelist: list[str],
+) -> EditResult:
+    """Explicitly delete a file inside the task worktree within the target files whitelist."""
+    return edit_file(
+        workspace_root=workspace_root,
+        file_path=file_path,
+        old_str="",
+        new_str="",
+        target_files_whitelist=target_files_whitelist,
+        delete=True,
     )

@@ -7,11 +7,15 @@ from pathlib import Path
 
 import pytest
 
+from oswald.core.agents.coder import CoderAgent
+from oswald.core.llm.adapters.fake import FakeLLMClient
+from oswald.core.llm.types import ToolCall
 from oswald.core.sandbox.fake import FakeSandboxRuntime
 from oswald.core.sandbox.models import SandboxConfig
 from oswald.core.tools.coder import (
     CODER_TOOL_DEFINITIONS,
     check_declared_imports,
+    delete_file,
     edit_file,
     is_protected_path,
     is_test_path,
@@ -21,6 +25,7 @@ from oswald.core.tools.coder import (
     search_code,
 )
 from oswald.core.tools.coder.checks import ALLOWLISTED_COMMANDS, SAFE_CACHE_ENV
+from oswald.core.vcs.workspace import FakeWorkspaceDiff
 
 
 @pytest.fixture
@@ -191,6 +196,78 @@ def test_edit_file_creation_and_replacement(workspace: Path) -> None:
     assert "old_str was not found" in err_res.message
 
 
+def test_edit_file_deletion_whitelisted(workspace: Path) -> None:
+    """Verify delete_file and edit_file delete flag remove files within authorized whitelist."""
+    # 1. Successful deletion via delete_file
+    target = workspace / "src/pkg/obsolete.py"
+    target.write_text("# Obsolete file\n", encoding="utf-8")
+    assert target.exists() is True
+
+    res = delete_file(
+        workspace_root=workspace,
+        file_path="src/pkg/obsolete.py",
+        target_files_whitelist=["src/pkg/obsolete.py"],
+    )
+    assert res.success is True
+    assert res.is_deleted is True
+    assert target.exists() is False
+    assert "Successfully deleted" in res.message
+
+    # 2. Successful deletion via edit_file(delete=True)
+    target2 = workspace / "src/pkg/deprecated.py"
+    target2.write_text("# Deprecated file\n", encoding="utf-8")
+    assert target2.exists() is True
+
+    res2 = edit_file(
+        workspace_root=workspace,
+        file_path="src/pkg/deprecated.py",
+        target_files_whitelist=["src/pkg/deprecated.py"],
+        delete=True,
+    )
+    assert res2.success is True
+    assert res2.is_deleted is True
+    assert target2.exists() is False
+
+
+def test_edit_file_deletion_guards(workspace: Path) -> None:
+    """Verify security guards enforce whitelist, test protection, and existence on deletion."""
+    # Guard 1: Whitelist rejection
+    target = workspace / "src/pkg/unauthorized.py"
+    target.write_text("# Unauthorized\n", encoding="utf-8")
+
+    res = delete_file(
+        workspace_root=workspace,
+        file_path="src/pkg/unauthorized.py",
+        target_files_whitelist=["src/pkg/other.py"],
+    )
+    assert res.success is False
+    assert "PermissionDenied" in res.message
+    assert target.exists() is True
+
+    # Guard 2: Test file protection (Coder cannot delete test files)
+    test_target = workspace / "tests/test_something.py"
+    test_target.parent.mkdir(parents=True, exist_ok=True)
+    test_target.write_text("# Test\n", encoding="utf-8")
+
+    res_test = delete_file(
+        workspace_root=workspace,
+        file_path="tests/test_something.py",
+        target_files_whitelist=["tests/test_something.py"],
+    )
+    assert res_test.success is False
+    assert "PermissionDenied" in res_test.message
+    assert test_target.exists() is True
+
+    # Guard 3: Deleting nonexistent file fails cleanly
+    res_missing = delete_file(
+        workspace_root=workspace,
+        file_path="src/pkg/nonexistent.py",
+        target_files_whitelist=["src/pkg/nonexistent.py"],
+    )
+    assert res_missing.success is False
+    assert "does not exist to be deleted" in res_missing.message
+
+
 def test_check_declared_imports(workspace: Path) -> None:
     """Verify check_declared_imports warns about undeclared third-party packages."""
     # Add a file importing declared (pydantic), stdlib (os, sys), and undeclared (requests)
@@ -306,3 +383,47 @@ def test_is_protected_and_is_test_path() -> None:
     assert is_test_path("tests/unit/test_api.py") is True
     assert is_test_path("src/test_utils.py") is True
     assert is_test_path("src/pkg/service.py") is False
+
+
+async def test_coder_agent_tool_dispatch_for_deletion(workspace: Path) -> None:
+    """Verify CoderAgent._execute_tool_call handles both edit_file(delete=True) and delete_file."""
+    agent = CoderAgent(
+        llm=FakeLLMClient(),
+        sandbox=FakeSandboxRuntime(SandboxConfig(task_id="t-del", workspace_path=workspace)),
+        workspace_diff=FakeWorkspaceDiff(),
+        workspace_root=workspace,
+    )
+
+    # 1. Dispatch delete_file tool call
+    del_target = workspace / "src/pkg/obsolete_a.py"
+    del_target.write_text("class Old: pass\n", encoding="utf-8")
+    assert del_target.exists() is True
+
+    call1 = ToolCall(
+        id="c1",
+        name="delete_file",
+        arguments={"file_path": "src/pkg/obsolete_a.py"},
+    )
+    msg1, success1 = await agent._execute_tool_call(
+        call1, target_files=["src/pkg/obsolete_a.py"], task_id="t-del"
+    )
+    assert success1 is True
+    assert "Successfully deleted" in msg1
+    assert del_target.exists() is False
+
+    # 2. Dispatch edit_file with delete=True
+    del_target2 = workspace / "src/pkg/obsolete_b.py"
+    del_target2.write_text("class Old2: pass\n", encoding="utf-8")
+    assert del_target2.exists() is True
+
+    call2 = ToolCall(
+        id="c2",
+        name="edit_file",
+        arguments={"file_path": "src/pkg/obsolete_b.py", "delete": True},
+    )
+    msg2, success2 = await agent._execute_tool_call(
+        call2, target_files=["src/pkg/obsolete_b.py"], task_id="t-del"
+    )
+    assert success2 is True
+    assert "Successfully deleted" in msg2
+    assert del_target2.exists() is False

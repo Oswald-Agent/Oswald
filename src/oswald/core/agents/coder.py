@@ -240,18 +240,20 @@ class CoderAgent:
                 out = read_symbol(self.workspace_root, symbol, self.indexer)
                 return out, not out.startswith("Error:")
 
-            elif name == "edit_file":
+            elif name in {"edit_file", "delete_file"}:
                 file_path = str(args.get("file_path") or "")
                 old_val = args.get("old_str")
                 old_str = "" if old_val is None else str(old_val)
                 new_val = args.get("new_str")
                 new_str = "" if new_val is None else str(new_val)
+                is_delete = bool(args.get("delete", False)) or (name == "delete_file")
                 res = edit_file(
                     self.workspace_root,
                     file_path,
                     old_str,
                     new_str,
                     target_files,
+                    delete=is_delete,
                 )
                 if res.success and self.indexer is not None:
                     # Update symbol index asynchronously

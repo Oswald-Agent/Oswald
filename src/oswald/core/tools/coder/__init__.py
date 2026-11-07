@@ -9,7 +9,13 @@ from oswald.core.tools.coder.checks import (
     StaticCheckResult,
     run_static_check,
 )
-from oswald.core.tools.coder.edit import EditResult, edit_file, is_protected_path, is_test_path
+from oswald.core.tools.coder.edit import (
+    EditResult,
+    delete_file,
+    edit_file,
+    is_protected_path,
+    is_test_path,
+)
 from oswald.core.tools.coder.imports import check_declared_imports, get_declared_packages
 from oswald.core.tools.coder.read import (
     get_file_summary,
@@ -103,7 +109,8 @@ CODER_TOOL_DEFINITIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="edit_file",
         description=(
-            "Modify an existing file by replacing old_str with new_str, or create a new file if old_str is empty. "
+            "Modify an existing file by replacing old_str with new_str, create a new file if old_str is empty, "
+            "or delete an existing file if delete is true. "
             "Must be within authorized target_files. Cannot edit test files or sensitive manifests without authorization."
         ),
         parameters={
@@ -111,18 +118,25 @@ CODER_TOOL_DEFINITIONS: list[ToolDefinition] = [
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Relative path of file to edit or create",
+                    "description": "Relative path of file to edit, create, or delete",
                 },
                 "old_str": {
                     "type": "string",
                     "description": "Exact text chunk to be replaced. Pass empty string to create a new file.",
+                    "default": "",
                 },
                 "new_str": {
                     "type": "string",
-                    "description": "Replacement text content",
+                    "description": "Replacement text content.",
+                    "default": "",
+                },
+                "delete": {
+                    "type": "boolean",
+                    "description": "Whether to delete the file. When true, file is deleted from workspace.",
+                    "default": False,
                 },
             },
-            "required": ["file_path", "old_str", "new_str"],
+            "required": ["file_path"],
         },
     ),
     ToolDefinition(
@@ -159,6 +173,7 @@ __all__ = [
     "EditResult",
     "StaticCheckResult",
     "check_declared_imports",
+    "delete_file",
     "edit_file",
     "get_declared_packages",
     "get_file_summary",
