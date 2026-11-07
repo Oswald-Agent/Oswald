@@ -268,6 +268,57 @@ def test_edit_file_deletion_guards(workspace: Path) -> None:
     assert "does not exist to be deleted" in res_missing.message
 
 
+def test_edit_file_crlf_lf_fallback_normalization(workspace: Path) -> None:
+    """Verify edit_file normalizes CRLF and LF differences while preserving file line endings."""
+    # 1. CRLF file edited with LF old_str
+    crlf_file = workspace / "src/pkg/windows.py"
+    crlf_file.write_bytes(b"def alpha():\r\n    return 1\r\n\r\ndef beta():\r\n    return 2\r\n")
+
+    res_crlf = edit_file(
+        workspace_root=workspace,
+        file_path="src/pkg/windows.py",
+        old_str="def alpha():\n    return 1\n",
+        new_str="def alpha():\n    return 42\n",
+        target_files_whitelist=["src/pkg/windows.py"],
+    )
+    assert res_crlf.success is True
+    updated_crlf = crlf_file.read_bytes()
+    assert b"return 42\r\n" in updated_crlf
+    assert b"\r\n" in updated_crlf
+    assert b"def beta():\r\n    return 2\r\n" in updated_crlf
+
+    # 2. LF file edited with CRLF old_str
+    unix_file = workspace / "src/pkg/unix.py"
+    unix_file.write_bytes(b"def first():\n    return 'a'\n\ndef second():\n    return 'b'\n")
+
+    res_unix = edit_file(
+        workspace_root=workspace,
+        file_path="src/pkg/unix.py",
+        old_str="def second():\r\n    return 'b'\r\n",
+        new_str="def second():\r\n    return 'c'\r\n",
+        target_files_whitelist=["src/pkg/unix.py"],
+    )
+    assert res_unix.success is True
+    updated_unix = unix_file.read_bytes()
+    assert b"return 'c'\n" in updated_unix
+    assert b"\r\n" not in updated_unix
+
+    # 3. Direct match single-line edit in CRLF file with LF new_str
+    direct_crlf_file = workspace / "src/pkg/direct_crlf.py"
+    direct_crlf_file.write_bytes(b"TAG = 1\r\nVALUE = 2\r\n")
+
+    res_direct = edit_file(
+        workspace_root=workspace,
+        file_path="src/pkg/direct_crlf.py",
+        old_str="TAG = 1",
+        new_str="TAG = 1\nEXTRA = 99",
+        target_files_whitelist=["src/pkg/direct_crlf.py"],
+    )
+    assert res_direct.success is True
+    updated_direct = direct_crlf_file.read_bytes()
+    assert updated_direct == b"TAG = 1\r\nEXTRA = 99\r\nVALUE = 2\r\n"
+
+
 def test_check_declared_imports(workspace: Path) -> None:
     """Verify check_declared_imports warns about undeclared third-party packages."""
     # Add a file importing declared (pydantic), stdlib (os, sys), and undeclared (requests)

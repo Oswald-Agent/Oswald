@@ -206,7 +206,7 @@ def edit_file(
         )
 
     try:
-        content = target.read_text(encoding="utf-8")
+        content = target.read_bytes().decode("utf-8")
     except (UnicodeDecodeError, OSError) as exc:
         return EditResult(
             success=False,
@@ -214,26 +214,52 @@ def edit_file(
             message=f"Error reading file '{clean_path}': {exc}",
         )
 
-    count = content.count(old_str)
-    if count == 0:
-        return EditResult(
-            success=False,
-            file_path=clean_path,
-            message=f"Error: old_str was not found in '{clean_path}'. Verify indentation and surrounding lines.",
-        )
-    if count > 1:
-        return EditResult(
-            success=False,
-            file_path=clean_path,
-            message=(
-                f"Error: old_str matches {count} occurrences in '{clean_path}'. "
-                f"Please include more surrounding context lines in old_str to ensure a unique match."
-            ),
-        )
+    # Direct match check
+    if old_str in content:
+        matches = content.count(old_str)
+        if matches != 1:
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=(
+                    f"Error: old_str matches {matches} occurrences in '{clean_path}'. "
+                    f"Please include more surrounding context lines in old_str to ensure a unique match."
+                ),
+            )
+        if "\r\n" in content and "\r\n" not in new_str:
+            target_new = new_str.replace("\n", "\r\n")
+        elif "\r\n" not in content and "\r\n" in new_str:
+            target_new = new_str.replace("\r\n", "\n")
+        else:
+            target_new = new_str
+        updated_content = content.replace(old_str, target_new, 1)
+    else:
+        # Cross-platform newline normalization fallback (handles CRLF vs LF differences)
+        norm_content = content.replace("\r\n", "\n")
+        norm_old = old_str.replace("\r\n", "\n")
+        norm_new = new_str.replace("\r\n", "\n")
+        matches = norm_content.count(norm_old)
+        if matches == 0:
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=f"Error: old_str was not found in '{clean_path}'. Verify indentation and surrounding lines.",
+            )
+        if matches > 1:
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=(
+                    f"Error: old_str matches {matches} occurrences in '{clean_path}'. "
+                    f"Please include more surrounding context lines in old_str to ensure a unique match."
+                ),
+            )
+        updated_norm = norm_content.replace(norm_old, norm_new, 1)
+        # Restore CRLF if file originally used CRLF line endings
+        updated_content = updated_norm.replace("\n", "\r\n") if "\r\n" in content else updated_norm
 
-    updated_content = content.replace(old_str, new_str, 1)
     try:
-        target.write_text(updated_content, encoding="utf-8")
+        target.write_bytes(updated_content.encode("utf-8"))
     except OSError as exc:
         return EditResult(
             success=False,
