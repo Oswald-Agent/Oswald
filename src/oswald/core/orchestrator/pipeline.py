@@ -90,7 +90,7 @@ class Orchestrator:
         agents: AgentFactory,
         sandbox: Callable[[SandboxConfig], SandboxRuntime],
         *,
-        image: str = "python:3.12-slim",
+        image: str | None = None,
         network_disabled: bool = True,
         stage_timeout: float = 1800,
         progress_interval: float = 10,
@@ -132,8 +132,10 @@ class Orchestrator:
         await asyncio.to_thread(
             shutil.copyfile, report_dir / "run.json", report_dir / f"run-{uuid4().hex}.json"
         )
-        if image is not None:
-            previous = previous.model_copy(update={"image": image})
+        # Explicit CLI or orchestrator image takes absolute precedence; otherwise use continue parameter
+        effective_image = self.image if self.image is not None else image
+        if effective_image is not None:
+            previous = previous.model_copy(update={"image": effective_image})
         return await self._run(data.request, base_ref=data.base_commit, previous=previous)
 
     async def run(self, request: str, *, base_ref: str = "HEAD") -> RunResult:
@@ -161,7 +163,12 @@ class Orchestrator:
         workspace_restored = previous is None or not previous.patch_path
         start_attempt = max(previous.attempts, 1) if previous else 1
         repo_path = Path(previous.repo_path) if previous and previous.repo_path else self.repo_path
-        image = previous.image if previous and previous.image else self.image
+        # Explicit image override takes absolute precedence across all pipeline stages
+        image = (
+            self.image
+            if self.image is not None
+            else (previous.image if previous and previous.image else "python:3.12-slim")
+        )
         status: Literal["SUCCEEDED", "STOPPED", "FAILED", "CANCELLED"] = "STOPPED"
         reason = ""
         patch_path = previous.patch_path if previous else ""

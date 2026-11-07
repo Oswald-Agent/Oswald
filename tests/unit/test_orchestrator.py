@@ -865,3 +865,18 @@ async def test_continue_task_re_runs_coder_and_tester_if_intermediate_artifacts_
     assert "coder" in h.events
     assert "tester" in h.events
     assert "reviewer" in h.events
+
+
+async def test_orchestrator_explicit_image_override_precedence(repo: Path, tmp_path: Path) -> None:
+    """Explicit image override takes absolute precedence across pipeline run and continue_task."""
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.image = "custom/override:latest"
+    result = await h.pipeline.run("Fix something")
+    assert result.status == "SUCCEEDED"
+    assert result.image == "custom/override:latest"
+    assert h.runtime is not None
+    assert h.runtime.config.image == "custom/override:latest"
+
+    continued = await h.pipeline.continue_task(result.task_id)
+    assert continued.status == "SUCCEEDED"
+    assert continued.image == "custom/override:latest"

@@ -81,7 +81,7 @@ async def run(args: argparse.Namespace) -> int:
         FileSystemArtifactStore(output_dir),
         agents,
         DockerSandboxRuntime,
-        image=args.image or "python:3.12-slim",
+        image=args.image,
         network_disabled=not getattr(args, "allow_network", False),
         stage_timeout=args.stage_timeout,
         progress_interval=getattr(args, "progress_interval", 10),
