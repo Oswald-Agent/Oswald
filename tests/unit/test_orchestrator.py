@@ -135,7 +135,7 @@ class Harness:
             verdict = self.review_status
             if verdict == "CHANGES_REQUESTED" and data.attempt == 2:
                 verdict = "APPROVED"
-            if not data.test_results.passed:
+            if not data.test_results.passed and verdict == "APPROVED":
                 verdict = "CHANGES_REQUESTED"
             return ReviewVerdict(
                 task_id=data.task_id,
@@ -211,6 +211,62 @@ async def test_one_correction_gets_findings_and_reruns_both(
     )
 
 
+async def test_failing_tests_coerces_approved_reviewer_verdict_to_retry(
+    repo: Path, tmp_path: Path
+) -> None:
+    """[PIPE-02]: When tests fail, prevent Reviewer ValueError by programmatically coercing
+    any APPROVED verdict to CHANGES_REQUESTED and looping cleanly to Attempt 2."""
+    h = Harness(repo, tmp_path / "reports")
+    h.fail_tests = 1  # Fails on attempt 1, passes on attempt 2
+    h.review_status = "APPROVED"  # Reviewer returns APPROVED despite failing tests
+    result = await h.pipeline.run("Fix")
+    assert result.status == "SUCCEEDED"
+    assert result.attempts == 2
+    assert h.events == ["planner", "coder", "tester", "reviewer", "coder", "tester", "reviewer"]
+    coder_input_2 = h.inputs[4]
+    assert isinstance(coder_input_2, CoderInput)
+    assert coder_input_2.attempt == 2
+    assert "tester" in {f.source for f in coder_input_2.findings}
+    assert "reviewer" in {f.source for f in coder_input_2.findings}
+
+
+async def test_rejection_on_attempt_1_retries_and_succeeds_on_attempt_2(
+    repo: Path, tmp_path: Path
+) -> None:
+    """[PIPE-03]: In pipeline.py, only abort on review.verdict == 'REJECTED' if attempts
+    are exhausted; on earlier attempts, convert rejections into actionable findings for Attempt 2."""
+    h = Harness(repo, tmp_path / "reports")
+    original_agents = h.pipeline.agents
+
+    def factory(root: Path, runtime: SandboxRuntime, diff: WorkspaceDiff) -> Agents:
+        agents = original_agents(root, runtime, diff)
+
+        async def dynamic_review(data: ReviewerInput) -> ReviewVerdict:
+            h.events.append("reviewer")
+            h.inputs.append(data)
+            verdict: ReviewVerdictStatus = "REJECTED" if data.attempt == 1 else "APPROVED"
+            return ReviewVerdict(
+                task_id=data.task_id,
+                verdict=verdict,
+                summary="Initial rejection" if verdict == "REJECTED" else "Approved on retry",
+                blocking_issues=["Security concern"] if verdict == "REJECTED" else [],
+                content="Review notes",
+            )
+
+        return Agents(agents.planner, agents.coder, agents.tester, AsyncMock(run=dynamic_review))
+
+    h.pipeline.agents = factory
+    result = await h.pipeline.run("Fix")
+    assert result.status == "SUCCEEDED"
+    assert result.attempts == 2
+    assert h.events == ["planner", "coder", "tester", "reviewer", "coder", "tester", "reviewer"]
+    coder_input_2 = h.inputs[4]
+    assert isinstance(coder_input_2, CoderInput)
+    assert coder_input_2.attempt == 2
+    reviewer_findings = [f for f in coder_input_2.findings if f.source == "reviewer"]
+    assert any("Security concern" in f.problem for f in reviewer_findings)
+
+
 async def test_correction_limit(repo: Path, tmp_path: Path) -> None:
     h = Harness(repo, tmp_path / "reports")
     h.fail_tests = 10
@@ -225,7 +281,11 @@ async def test_correction_limit(repo: Path, tmp_path: Path) -> None:
     [
         ("questions", "planner", ["planner"]),
         ("escalation", "coder", ["planner", "coder"]),
-        ("rejection", "reviewer", ["planner", "coder", "tester", "reviewer"]),
+        (
+            "rejection",
+            "reviewer",
+            ["planner", "coder", "tester", "reviewer", "coder", "tester", "reviewer"],
+        ),
         ("runtime", "tester", ["planner", "coder", "tester"]),
         ("foreign", "coder", ["planner", "coder"]),
     ],
@@ -317,6 +377,50 @@ async def test_timeout_and_cancellation(repo: Path, tmp_path: Path) -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert h.runtime and h.runtime.status == SandboxStatus.STOPPED
+    manifests = [json.loads(p.read_text()) for p in h.output.glob("*/run.json")]
+    assert any(m["status"] == "CANCELLED" for m in manifests)
+
+
+async def test_secondary_cancellation_shielded_teardown(repo: Path, tmp_path: Path) -> None:
+    """[PIPE-01]: Shield teardown routines with asyncio.shield and catch BaseException so containers
+    and worktrees always clean up on cancellation even when secondary cancellations occur."""
+    h = Harness(repo, tmp_path / "reports")
+    entered_stage = asyncio.Event()
+    entered_cleanup = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+
+    async def hang(_: PlannerInput) -> PlanSpec:
+        entered_stage.set()
+        await asyncio.sleep(100)
+        return PlanSpec.model_construct()
+
+    original_stop = FakeSandboxRuntime.stop
+
+    async def delayed_stop(runtime_self: FakeSandboxRuntime) -> None:
+        entered_cleanup.set()
+        await finish_cleanup.wait()
+        await original_stop(runtime_self)
+
+    base_agents = h.pipeline.agents
+
+    def factory(r: Path, rt: SandboxRuntime, d: WorkspaceDiff) -> Agents:
+        agents = base_agents(r, rt, d)
+        return Agents(AsyncMock(run=hang), agents.coder, agents.tester, agents.reviewer)
+
+    h.pipeline.agents = factory
+
+    with patch.object(FakeSandboxRuntime, "stop", new=delayed_stop):
+        task = asyncio.create_task(h.pipeline.run("Fix"))
+        await entered_stage.wait()
+        task.cancel()
+        await entered_cleanup.wait()
+        # Repeated cancellation while teardown is in flight
+        task.cancel()
+        finish_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
     assert h.runtime and h.runtime.status == SandboxStatus.STOPPED
     manifests = [json.loads(p.read_text()) for p in h.output.glob("*/run.json")]
     assert any(m["status"] == "CANCELLED" for m in manifests)
@@ -697,3 +801,67 @@ async def test_orchestrator_cleanup_ignores_workspace_oswald_logs(
     # Ensure malicious symlink was NOT copied to report_dir / logs
     copied_link = report_dir / "logs" / "leaked.txt"
     assert not copied_link.exists()
+
+
+async def test_continue_task_tolerant_of_missing_artifacts(repo: Path, tmp_path: Path) -> None:
+    """[PIPE-04]: Make artifact lookups in continue_task tolerant of missing stage artifacts,
+    avoiding StopIteration crashes."""
+    h = Harness(repo, tmp_path / "reports")
+    h.crash = "planner"
+    first = await h.pipeline.run("Fix")
+    assert first.status == "FAILED" and first.stage == "planner"
+    assert not any(a.name == "spec" for a in first.artifacts)
+
+    h.crash = ""
+    h.events.clear()
+    continued = await h.pipeline.continue_task(first.task_id)
+    assert continued.status == "SUCCEEDED"
+    assert "planner" in h.events
+    assert "coder" in h.events
+
+
+async def test_continue_task_tolerant_of_missing_stopped_artifacts(
+    repo: Path, tmp_path: Path
+) -> None:
+    """[PIPE-04]: When resuming stopped tasks with missing test_results or review artifacts,
+    continue_task does not raise StopIteration."""
+    h = Harness(repo, tmp_path / "reports")
+    h.fail_tests = 10
+    result = await h.pipeline.run("Fix")
+    assert result.status == "STOPPED"
+
+    # Keep spec, but strip subsequent stage artifacts from run.json to simulate missing lineage
+    run_path = h.output / result.task_id / "run.json"
+    manifest = json.loads(run_path.read_text())
+    manifest["artifacts"] = [a for a in manifest["artifacts"] if a.get("name") == "spec"]
+    run_path.write_text(json.dumps(manifest))
+
+    h.fail_tests = 0
+    h.events.clear()
+    continued = await h.pipeline.continue_task(result.task_id)
+    assert continued.status == "SUCCEEDED"
+
+
+async def test_continue_task_re_runs_coder_and_tester_if_intermediate_artifacts_missing(
+    repo: Path, tmp_path: Path
+) -> None:
+    """[PIPE-04]: When resume_stage is reviewer but code_changes artifact is missing,
+    Coder and Tester both re-run to avoid using stale test results on new changes."""
+    h = Harness(repo, tmp_path / "reports")
+    h.crash = "reviewer"
+    first = await h.pipeline.run("Fix")
+    assert first.status == "FAILED" and first.stage == "reviewer"
+
+    # Remove code_changes from run.json artifacts
+    run_path = h.output / first.task_id / "run.json"
+    manifest = json.loads(run_path.read_text())
+    manifest["artifacts"] = [a for a in manifest["artifacts"] if a.get("name") != "code_changes"]
+    run_path.write_text(json.dumps(manifest))
+
+    h.crash = ""
+    h.events.clear()
+    continued = await h.pipeline.continue_task(first.task_id)
+    assert continued.status == "SUCCEEDED"
+    assert "coder" in h.events
+    assert "tester" in h.events
+    assert "reviewer" in h.events

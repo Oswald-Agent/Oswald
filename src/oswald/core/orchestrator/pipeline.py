@@ -1,6 +1,7 @@
 """Bounded async pipeline; agents decide content, this module owns lifecycle and routing."""
 
 import asyncio
+import contextlib
 import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -190,26 +191,41 @@ class Orchestrator:
             )
             return validated
 
-        async def saved[T: BaseArtifact](name: str, model: type[T]) -> T:
-            ref = next(ref for ref in reversed(refs) if ref.name == name)
-            artifact = await self.store.load(ref, model)
+        async def saved[T: BaseArtifact](name: str, model: type[T]) -> T | None:
+            ref = next((ref for ref in reversed(refs) if ref.name == name), None)
+            if ref is None:
+                return None
+            try:
+                artifact = await self.store.load(ref, model)
+            except Exception:
+                return None
             if artifact.task_id != task_id:
                 raise ValueError(f"{name} belongs to another task")
             return artifact
 
-        def corrections(tests: TestResults, review: ReviewVerdict) -> list[Finding]:
+        def corrections(
+            tests: TestResults | None,
+            review: ReviewVerdict | None = None,
+        ) -> list[Finding]:
             findings = []
-            if not (tests.passed and tests.exit_code == 0 and tests.tests_failed == 0):
-                findings.append(
-                    Finding(
-                        source="tester",
-                        severity="major",
-                        problem=tests.content,
-                        evidence=tests.output[-500:],
-                        expected_correction="Correct the implementation so the tests pass.",
-                    )
+            if tests is not None:
+                clean_tests = (
+                    tests.passed
+                    and not tests.execution_error
+                    and tests.exit_code == 0
+                    and tests.tests_failed == 0
                 )
-            if review.verdict != "APPROVED" or review.blocking_issues:
+                if not clean_tests:
+                    findings.append(
+                        Finding(
+                            source="tester",
+                            severity="major",
+                            problem=tests.content,
+                            evidence=tests.output[-500:],
+                            expected_correction="Correct the implementation so the tests pass.",
+                        )
+                    )
+            if review is not None and (review.verdict != "APPROVED" or review.blocking_issues):
                 findings.extend(
                     Finding(
                         source="reviewer",
@@ -234,17 +250,21 @@ class Orchestrator:
         logger.info("run.started", task_id=task_id, image=image)
         try:
             if previous and previous.status == "STOPPED" and resume_stage in {"tester", "reviewer"}:
-                findings = corrections(
-                    await saved("test_results", TestResults),
-                    await saved("review", ReviewVerdict),
-                )
-                start_attempt += 1
-                resume_stage = "coder"
+                test_results_art = await saved("test_results", TestResults)
+                review_art = await saved("review", ReviewVerdict)
+                if test_results_art and review_art:
+                    findings = corrections(test_results_art, review_art)
+                    start_attempt += 1
+                    resume_stage = "coder"
+                elif test_results_art is None:
+                    resume_stage = "tester"
+                else:
+                    resume_stage = "reviewer"
             if previous and resume_stage == "coder" and start_attempt > 1 and not findings:
-                findings = corrections(
-                    await saved("test_results", TestResults),
-                    await saved("review", ReviewVerdict),
-                )
+                test_results_art = await saved("test_results", TestResults)
+                review_art = await saved("review", ReviewVerdict)
+                if test_results_art or review_art:
+                    findings = corrections(test_results_art, review_art)
             attempt = start_attempt if previous else 0
             manager = WorktreeManager(repo_path, report_dir / "workspace")
             context = await call(manager.create_worktree(task_id, base_ref=base_ref))
@@ -276,9 +296,12 @@ class Orchestrator:
             diff = WorktreeWorkspaceDiff(manager)
             stage = "planner"
             agents = self.agents(root, runtime, diff)
+            restored_spec = False
+            spec: PlanSpec | None = None
             if previous and resume_stage not in {"workspace", "sandbox", "planner"}:
                 spec = await saved("spec", PlanSpec)
-            else:
+                restored_spec = spec is not None
+            if spec is None:
                 spec = await save(
                     "spec",
                     await invoke(
@@ -298,13 +321,17 @@ class Orchestrator:
             else:
                 for attempt in range(start_attempt, start_attempt + 2):
                     stage = "coder"
+                    changes: CodeChanges | None = None
+                    restored_changes = False
                     if (
                         previous
+                        and restored_spec
                         and attempt == start_attempt
                         and resume_stage in {"tester", "reviewer"}
                     ):
                         changes = await saved("code_changes", CodeChanges)
-                    else:
+                        restored_changes = changes is not None
+                    if changes is None:
                         changes = await save(
                             "code_changes",
                             await invoke(
@@ -324,9 +351,15 @@ class Orchestrator:
                         reason = changes.escalation or changes.summary
                         break
                     stage = "tester"
-                    if previous and attempt == start_attempt and resume_stage == "reviewer":
+                    tests: TestResults | None = None
+                    if (
+                        previous
+                        and restored_changes
+                        and attempt == start_attempt
+                        and resume_stage == "reviewer"
+                    ):
                         tests = await saved("test_results", TestResults)
-                    else:
+                    if tests is None:
                         tests = await save(
                             "test_results",
                             await invoke(
@@ -368,14 +401,30 @@ class Orchestrator:
                         ReviewVerdict,
                     )
                     latest_review = review
-                    clean_tests = tests.passed and tests.exit_code == 0 and tests.tests_failed == 0
-                    if review.verdict == "REJECTED":
-                        reason = review.summary + ": " + "; ".join(review.blocking_issues)
-                        break
+                    clean_tests = (
+                        tests.passed
+                        and not tests.execution_error
+                        and tests.exit_code == 0
+                        and tests.tests_failed == 0
+                    )
+                    if not clean_tests and review.verdict == "APPROVED":
+                        review = review.model_copy(
+                            update={
+                                "verdict": "CHANGES_REQUESTED",
+                                "blocking_issues": review.blocking_issues
+                                or ["Changes cannot be approved while tests fail"],
+                            }
+                        )
+                        review = await save("review", review, ReviewVerdict)
+                        latest_review = review
                     if clean_tests and review.verdict == "APPROVED" and not review.blocking_issues:
                         status, reason = "SUCCEEDED", "Tests passed and Reviewer approved"
                         break
-                    if not clean_tests:
+                    if review.verdict == "REJECTED":
+                        reason = review.summary + ": " + "; ".join(review.blocking_issues)
+                        if attempt == start_attempt + 1:
+                            break
+                    elif not clean_tests:
                         stage = "tester"
                         reason = "Tests failed: " + tests.content
                     else:
@@ -396,34 +445,49 @@ class Orchestrator:
             status, reason = "FAILED", f"{type(exc).__name__}: {exc}"
         finally:
             # Stop even after partial startup; preserve changes if snapshot or teardown fails.
-            if runtime is not None:
-                try:
-                    await call(runtime.stop())
-                except Exception as exc:
-                    cleanup_errors.append(f"sandbox: {exc}")
-            if root is None and manager is not None:
-                candidate = manager.get_worktree_path(task_id)
-                if await asyncio.to_thread(candidate.is_dir):
-                    root = candidate
-            if root is not None and not workspace_restored:
-                cleanup_errors.append(
-                    f"restore failed; saved patch preserved, worktree retained at {root}"
-                )
-            if root is not None and manager is not None and workspace_restored:
-                try:
-                    final_diff = await call(manager.get_diff(task_id))
-                    target = report_dir / "final.patch"
-                    await asyncio.to_thread(target.write_text, final_diff.diff, encoding="utf-8")
-                    patch_path = str(target)
-                except Exception as exc:
-                    cleanup_errors.append(f"patch: {exc}; worktree retained at {root}")
-                if patch_path and not cleanup_errors:
+            async def _teardown() -> None:
+                nonlocal root, patch_path, cleanup_errors
+                if runtime is not None:
                     try:
-                        await call(manager.remove_worktree(task_id))
-                        if await asyncio.to_thread(root.exists):
-                            raise RuntimeError(f"Worktree still exists at {root}")
-                    except Exception as exc:
-                        cleanup_errors.append(f"worktree: {exc}")
+                        await call(runtime.stop())
+                    except BaseException as exc:
+                        cleanup_errors.append(f"sandbox: {exc}")
+                if root is None and manager is not None:
+                    try:
+                        candidate = manager.get_worktree_path(task_id)
+                        if await asyncio.to_thread(candidate.is_dir):
+                            root = candidate
+                    except BaseException as exc:
+                        cleanup_errors.append(f"candidate_worktree: {exc}")
+                if root is not None and not workspace_restored:
+                    cleanup_errors.append(
+                        f"restore failed; saved patch preserved, worktree retained at {root}"
+                    )
+                if root is not None and manager is not None and workspace_restored:
+                    try:
+                        final_diff = await call(manager.get_diff(task_id))
+                        target = report_dir / "final.patch"
+                        await asyncio.to_thread(
+                            target.write_text, final_diff.diff, encoding="utf-8"
+                        )
+                        patch_path = str(target)
+                    except BaseException as exc:
+                        cleanup_errors.append(f"patch: {exc}; worktree retained at {root}")
+                    if patch_path and not cleanup_errors:
+                        try:
+                            await call(manager.remove_worktree(task_id))
+                            if await asyncio.to_thread(root.exists):
+                                raise RuntimeError(f"Worktree still exists at {root}")
+                        except BaseException as exc:
+                            cleanup_errors.append(f"worktree: {exc}")
+
+            teardown_task = asyncio.create_task(_teardown())
+            while not teardown_task.done():
+                with contextlib.suppress(BaseException):
+                    await asyncio.shield(teardown_task)
+            if teardown_task.exception() is not None:
+                cleanup_errors.append(f"teardown: {teardown_task.exception()}")
+
             if cleanup_errors and status != "CANCELLED":
                 status = "FAILED"
                 reason += "; Cleanup failed: " + "; ".join(cleanup_errors)
@@ -444,11 +508,21 @@ class Orchestrator:
                 resume_stage=resume_stage if stage in {"workspace", "sandbox"} else stage,
                 findings=findings,
             )
-            await asyncio.to_thread(
-                (report_dir / "run.json").write_text,
-                result.model_dump_json(indent=2),
-                encoding="utf-8",
-            )
+            while True:
+                try:
+                    await asyncio.shield(
+                        asyncio.to_thread(
+                            (report_dir / "run.json").write_text,
+                            result.model_dump_json(indent=2),
+                            encoding="utf-8",
+                        )
+                    )
+                    break
+                except asyncio.CancelledError:
+                    continue
+                except BaseException as exc:
+                    logger.error("run.report_write_failed", error=str(exc))
+                    break
             totals = result.metrics.model_dump(exclude={"agents"})
             verification: dict[str, str | int] = {}
             if latest_tests is not None:
