@@ -354,6 +354,24 @@ async def test_execute_test_command_variations(workspace: Path) -> None:
     assert "Sandbox execution error" in err.output
 
 
+async def test_execute_test_command_injects_non_interactive_ci_environment(
+    workspace: Path,
+) -> None:
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    await sandbox.start()
+    sandbox.queue_response(exit_code=0, stdout="OK")
+
+    await execute_test_command(sandbox, ["pytest", "tests/"])
+
+    assert sandbox.executed_envs, "Expected executed_envs to record environment"
+    env = sandbox.executed_envs[-1]
+    assert env["CI"] == "1"
+    assert env["DEBIAN_FRONTEND"] == "noninteractive"
+    assert env["NO_COLOR"] == "1"
+    assert env["TERM"] == "dumb"
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
 def test_snapshot_restores_non_test_mutations(workspace: Path) -> None:
     snapshot = WorkspaceSnapshot.capture(workspace)
     (workspace / "app.py").write_text("changed", encoding="utf-8")

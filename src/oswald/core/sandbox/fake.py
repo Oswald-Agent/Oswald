@@ -23,6 +23,7 @@ class FakeSandboxRuntime:
         self._execute_locally = execute_locally
         self._status: SandboxStatus = SandboxStatus.PENDING
         self.executed_commands: list[list[str]] = []
+        self.executed_envs: list[dict[str, str]] = []
         self._mock_responses: deque[ExecResult] = deque()
         self._active_procs: set[asyncio.subprocess.Process] = set()
 
@@ -77,6 +78,7 @@ class FakeSandboxRuntime:
             )
 
         self.executed_commands.append(list(cmd))
+        self.executed_envs.append(dict(env or {}))
 
         # Return queued mock if present
         if self._mock_responses:

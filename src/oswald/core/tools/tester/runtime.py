@@ -354,6 +354,7 @@ async def execute_test_command(
     sandbox: SandboxRuntime,
     command: list[str],
     timeout_seconds: float = 120.0,
+    env: dict[str, str] | None = None,
 ) -> CommandResult:
     """Run an argument-vector command in the isolated sandbox without shell wrapping."""
     clean = [str(part) for part in command if str(part).strip()]
@@ -363,14 +364,22 @@ async def execute_test_command(
             [], 1, "PermissionDenied: command must contain at least one argument.", 0.0
         )
 
+    ci_env = {
+        "CI": "1",
+        "DEBIAN_FRONTEND": "noninteractive",
+        "NO_COLOR": "1",
+        "TERM": "dumb",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPYCACHEPREFIX": "/tmp/oswald-test-pycache",  # noqa: S108
+    }
+    if env:
+        ci_env.update(env)
+
     try:
         result = await sandbox.exec_command(
             clean,
             timeout_seconds=timeout_seconds,
-            env={
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONPYCACHEPREFIX": "/tmp/oswald-test-pycache",  # noqa: S108
-            },
+            env=ci_env,
         )
     except SandboxTimeoutError as exc:
         logger.error("test_tool.command_timeout", command=clean, timeout=timeout_seconds)
