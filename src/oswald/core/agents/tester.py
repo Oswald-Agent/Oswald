@@ -133,8 +133,6 @@ class TesterAgent:
 
         parts.extend(
             [
-                f"## Code Changes Summary\n{data.changes.summary}",
-                f"## Code Changes Notes (changes.md)\n{data.changes.content}",
                 "## Modified Files (Strict Source Isolation)\n"
                 + "\n".join(f"- `{item}`" for item in data.changes.modified_files),
                 f"## Unified Diff\n```diff\n{data.changes.diff}\n```",

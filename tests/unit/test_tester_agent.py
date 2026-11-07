@@ -1218,3 +1218,40 @@ def test_extract_metrics_strips_ansi_csi_osc_and_cursor_control() -> None:
         12,
         2,
     )
+
+
+def test_initial_messages_omits_coder_narrative_commentary(workspace: Path) -> None:
+    agent = TesterAgent(
+        FakeLLMClient(),
+        FakeSandboxRuntime(SandboxConfig(task_id="t-1", workspace_path=workspace)),
+        workspace,
+    )
+    inp = TesterInput(
+        task_id="t-1",
+        spec=PlanSpec(
+            task_id="t-1",
+            summary="Spec summary",
+            target_files=["app.py"],
+            content="# Spec",
+            acceptance_criteria=["Criterion 1"],
+        ),
+        changes=CodeChanges(
+            task_id="t-1",
+            summary="Subjective summary of changes",
+            content="Subjective narrative explaining why tests should pass easily.",
+            modified_files=["app.py"],
+            diff="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new",
+            test_attention=["Check new output"],
+        ),
+    )
+    messages = agent._build_initial_messages(inp)
+    user_prompt = messages[1].content
+
+    assert "Subjective narrative explaining why tests should pass easily." not in user_prompt
+    assert "changes.md" not in user_prompt
+    assert "Subjective summary of changes" not in user_prompt
+
+    assert "## Unified Diff" in user_prompt
+    assert "## Modified Files (Strict Source Isolation)" in user_prompt
+    assert "## Required Test Attention" in user_prompt
+    assert "Check new output" in user_prompt
