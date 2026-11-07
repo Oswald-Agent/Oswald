@@ -8,6 +8,7 @@ filesystem collision or lock contention.
 import asyncio
 import re
 import shutil
+import subprocess
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -364,3 +365,26 @@ class WorktreeManager:
             yield context
         finally:
             await self.remove_worktree(task_id)
+
+
+def checkout_file_from_ref(
+    repo_path: Path,
+    base_ref: str,
+    rel_path: str,
+    timeout: float = 30.0,
+) -> bool:
+    """Check out a specific file path from a base Git reference."""
+    git_bin = shutil.which("git")
+    if not git_bin:
+        return False
+    try:
+        res = subprocess.run(  # noqa: S603
+            [git_bin, "checkout", base_ref, "--", rel_path],
+            cwd=str(repo_path),
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        return res.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False

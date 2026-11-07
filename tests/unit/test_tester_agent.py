@@ -397,6 +397,50 @@ def test_snapshot_allows_coverage_and_test_artifacts(workspace: Path) -> None:
     assert (workspace / "junit.xml").exists()
 
 
+def test_snapshot_restores_large_file_via_git_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+    import subprocess
+
+    from oswald.core.tools.tester import runtime
+
+    git_bin = shutil.which("git") or "/usr/bin/git"
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run([git_bin, "init"], cwd=repo_dir, check=True, capture_output=True)  # noqa: S603
+    subprocess.run(  # noqa: S603
+        [git_bin, "config", "user.name", "Test"], cwd=repo_dir, check=True, capture_output=True
+    )
+    subprocess.run(  # noqa: S603
+        [git_bin, "config", "user.email", "test@example.com"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    large_file = repo_dir / "large_model.bin"
+    large_file.write_bytes(b"initial large binary data payload" * 10)
+    subprocess.run(  # noqa: S603
+        [git_bin, "add", "."], cwd=repo_dir, check=True, capture_output=True
+    )
+    subprocess.run(  # noqa: S603
+        [git_bin, "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True
+    )
+
+    monkeypatch.setattr(runtime, "_MAX_SNAPSHOT_FILE_BYTES", 50)
+
+    snapshot = WorkspaceSnapshot.capture(repo_dir)
+    assert snapshot.files["large_model.bin"].content is None
+
+    large_file.write_bytes(b"corrupted mutations by test command")
+    assert large_file.read_bytes() == b"corrupted mutations by test command"
+
+    affected = snapshot.restore_non_test_changes(repo_dir)
+    assert affected == ["large_model.bin"]
+    assert large_file.read_bytes() == b"initial large binary data payload" * 10
+
+
 def test_is_test_related_path_multi_platform_and_languages() -> None:
     # Python
     assert is_test_related_path("tests/unit/test_app.py") is True

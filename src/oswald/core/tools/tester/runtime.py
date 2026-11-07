@@ -21,6 +21,7 @@ from oswald.core.tools.coder.read import (
     normalize_workspace_rel_path,
     validate_workspace_path,
 )
+from oswald.core.vcs.worktree import checkout_file_from_ref
 
 logger = structlog.get_logger(component="tools.tester")
 
@@ -473,10 +474,28 @@ class WorkspaceSnapshot:
 
         return cls(captured)
 
+    @staticmethod
+    def _restore_from_git(root: Path, rel_path: str, base_ref: str = "HEAD") -> bool:
+        """Check out original file from Git base ref when in-memory cache was skipped."""
+        if checkout_file_from_ref(root, base_ref, rel_path):
+            logger.info(
+                "test_snapshot.large_file_restored_from_git",
+                path=rel_path,
+                base_ref=base_ref,
+            )
+            return True
+        logger.error(
+            "test_snapshot.git_checkout_failed",
+            path=rel_path,
+            base_ref=base_ref,
+        )
+        return False
+
     def restore_non_test_changes(
         self,
         workspace_root: Path,
         test_roots: set[str] | None = None,
+        base_ref: str = "HEAD",
     ) -> list[str]:
         """Restore any non-test file changed or created since capture.
 
@@ -527,6 +546,8 @@ class WorkspaceSnapshot:
                         with contextlib.suppress(OSError):
                             target.chmod(orig_info.mode)
                     logger.info("test_snapshot.non_test_file_restored", path=path)
+                else:
+                    self._restore_from_git(root, path, base_ref=base_ref)
 
         return affected
 
