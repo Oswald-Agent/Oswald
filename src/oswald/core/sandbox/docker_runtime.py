@@ -460,6 +460,33 @@ class DockerSandboxRuntime:
             )
         self._status = SandboxStatus.STOPPED
 
+    async def isolate_network(self) -> None:
+        """Lock the running container to offline air-gapped networking (--network none)."""
+        if self._status != SandboxStatus.RUNNING:
+            return
+
+        exit_code, stdout, _ = await self._run_docker(
+            [
+                "inspect",
+                "-f",
+                "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+                self.container_name,
+            ],
+            check=False,
+        )
+        if exit_code == 0:
+            networks = [
+                net.strip() for net in stdout.split() if net.strip() and net.strip() != "none"
+            ]
+            for net in networks:
+                await self._run_docker(
+                    ["network", "disconnect", net, self.container_name], check=False
+                )
+        else:
+            await self._run_docker(
+                ["network", "disconnect", "bridge", self.container_name], check=False
+            )
+
     async def is_running(self) -> bool:
         """Check if container is active and running."""
         if self._status != SandboxStatus.RUNNING:

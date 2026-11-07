@@ -990,3 +990,23 @@ async def test_orchestrator_dedicated_setup_turn_executes_dependencies(
     assert "install" in npm_cmd
     assert "--ignore-scripts" in npm_cmd
     assert "lodash@4.17.21" in npm_cmd
+
+
+async def test_orchestrator_locks_container_to_network_none_before_coder_and_tester(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Air-gap execution: container is locked to --network none before Coder and Tester runs."""
+    h = Harness(repo, tmp_path / "reports")
+    h.dependencies = [
+        DependencySpec(ecosystem="python", package="urllib3", version="2.0.0"),
+    ]
+    result = await h.pipeline.run("Perform isolated edit")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+    assert h.runtime.network_isolated is True
+
+    cmds = h.runtime.executed_commands
+    isolate_idx = cmds.index(["network", "isolate"])
+    assert isolate_idx != -1
+    venv_idx = cmds.index(["python3", "-m", "venv", "/workspace/.venv"])
+    assert venv_idx < isolate_idx

@@ -601,3 +601,38 @@ async def test_docker_stop_is_idempotent_when_container_absent(
     runtime._run_docker = AsyncMock(return_value=(1, "", "Error: No such container: task"))  # type: ignore[method-assign]
     await runtime.stop()
     assert _status(runtime) == SandboxStatus.STOPPED
+
+
+async def test_docker_sandbox_isolate_network_disconnects_all_networks(
+    sample_config: SandboxConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """isolate_network disconnects active container networks to enforce air-gapped execution."""
+    runtime = DockerSandboxRuntime(sample_config)
+    runtime._status = SandboxStatus.RUNNING
+
+    calls: list[list[str]] = []
+
+    async def mock_run_docker(args: object, **kwargs: object) -> tuple[int, str, str]:
+        if isinstance(args, (list, tuple)):
+            calls.append(list(args))
+            if "inspect" in args:
+                return 0, "bridge custom_net \n", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(runtime, "_run_docker", mock_run_docker)
+    await runtime.isolate_network()
+
+    # Verify disconnect was invoked for both networks
+    disconnect_calls = [c for c in calls if c[0] == "network" and c[1] == "disconnect"]
+    assert len(disconnect_calls) == 2
+    assert ["network", "disconnect", "bridge", runtime.container_name] in disconnect_calls
+    assert ["network", "disconnect", "custom_net", runtime.container_name] in disconnect_calls
+
+
+async def test_fake_sandbox_isolate_network(sample_config: SandboxConfig) -> None:
+    """Fake sandbox isolate_network marks network_isolated flag and records command."""
+    sandbox = FakeSandboxRuntime(sample_config)
+    assert not sandbox.network_isolated
+    await sandbox.isolate_network()
+    assert sandbox.network_isolated is True
+    assert ["network", "isolate"] in sandbox.executed_commands

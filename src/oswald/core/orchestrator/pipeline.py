@@ -413,6 +413,9 @@ class Orchestrator:
                 if spec.dependencies:
                     stage = "setup"
                     await invoke(self._setup_workspace_dependencies(runtime, spec.dependencies))
+                # Air-gap execution: lock container to --network none for subsequent Coder edits and Tester loops
+                if self.network_disabled:
+                    await runtime.isolate_network()
                 for attempt in range(start_attempt, start_attempt + 2):
                     stage = "coder"
                     changes: CodeChanges | None = None
