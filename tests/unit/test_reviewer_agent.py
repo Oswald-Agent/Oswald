@@ -236,17 +236,22 @@ async def test_reviewer_rejects_blank_text(
         await ReviewerAgent(client, model="fake/reviewer").run(_input(*review_inputs))
 
 
-@pytest.mark.parametrize("field", ["passed", "exit_code", "tests_failed"])
+@pytest.mark.parametrize("field", ["passed", "execution_error", "exit_code", "tests_failed"])
 async def test_reviewer_cannot_approve_failing_tests(
     review_inputs: tuple[PlanSpec, CodeChanges, TestResults], field: str
 ) -> None:
-    """Verify each deterministic failure signal blocks approval independently."""
+    """Verify each deterministic failure signal coerces approval to CHANGES_REQUESTED."""
     spec, changes, results = review_inputs
-    results = results.model_copy(update={field: False if field == "passed" else 1})
+    results = results.model_copy(
+        update={
+            field: False if field == "passed" else ("crash" if field == "execution_error" else 1)
+        }
+    )
     client = FakeLLMClient()
     client.enqueue_text(_response())
-    with pytest.raises(ValueError, match="failing tests"):
-        await ReviewerAgent(client, model="fake/reviewer").run(_input(spec, changes, results))
+    verdict = await ReviewerAgent(client, model="fake/reviewer").run(_input(spec, changes, results))
+    assert verdict.verdict == "CHANGES_REQUESTED"
+    assert "Changes cannot be approved while tests fail" in verdict.blocking_issues
 
 
 @pytest.mark.parametrize("field", ["has_open_questions", "open_questions"])

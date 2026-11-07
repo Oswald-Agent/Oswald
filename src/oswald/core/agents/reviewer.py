@@ -148,18 +148,29 @@ class ReviewerAgent:
             raise ValueError("Reviewer summary and content must not be blank")
         if any(not issue.strip() for issue in review.blocking_issues):
             raise ValueError("Reviewer blocking issues must not be blank")
+        failing_tests = (
+            not test_results.passed
+            or bool(test_results.execution_error)
+            or test_results.exit_code != 0
+            or test_results.tests_failed > 0
+        )
+        if review.verdict == "APPROVED" and failing_tests:
+            blocking = list(review.blocking_issues)
+            issue = "Changes cannot be approved while tests fail"
+            if issue not in blocking:
+                blocking.append(issue)
+            review = review.model_copy(
+                update={
+                    "verdict": "CHANGES_REQUESTED",
+                    "blocking_issues": blocking,
+                }
+            )
+
         if review.verdict == "APPROVED":
             if review.blocking_issues:
                 raise ValueError("Reviewer cannot approve changes with blocking issues")
             if changes.status != "COMPLETED":
                 raise ValueError("Reviewer cannot approve escalated code changes")
-            if (
-                not test_results.passed
-                or test_results.execution_error
-                or test_results.exit_code != 0
-                or test_results.tests_failed > 0
-            ):
-                raise ValueError("Reviewer cannot approve changes with failing tests")
             if spec.has_open_questions or spec.open_questions:
                 raise ValueError("Reviewer cannot approve a specification with open questions")
             # Match the relative path normalization used by the Coder's scope check.

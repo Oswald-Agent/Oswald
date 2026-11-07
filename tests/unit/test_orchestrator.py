@@ -135,7 +135,7 @@ class Harness:
             verdict = self.review_status
             if verdict == "CHANGES_REQUESTED" and data.attempt == 2:
                 verdict = "APPROVED"
-            if not data.test_results.passed:
+            if not data.test_results.passed and verdict == "APPROVED":
                 verdict = "CHANGES_REQUESTED"
             return ReviewVerdict(
                 task_id=data.task_id,
@@ -209,6 +209,25 @@ async def test_one_correction_gets_findings_and_reruns_both(
     assert len(await h.store.history(result.task_id, "test_results")) == (
         2 if source == "tester" else 1
     )
+
+
+async def test_failing_tests_coerces_approved_reviewer_verdict_to_retry(
+    repo: Path, tmp_path: Path
+) -> None:
+    """[PIPE-02]: When tests fail, prevent Reviewer ValueError by programmatically coercing
+    any APPROVED verdict to CHANGES_REQUESTED and looping cleanly to Attempt 2."""
+    h = Harness(repo, tmp_path / "reports")
+    h.fail_tests = 1  # Fails on attempt 1, passes on attempt 2
+    h.review_status = "APPROVED"  # Reviewer returns APPROVED despite failing tests
+    result = await h.pipeline.run("Fix")
+    assert result.status == "SUCCEEDED"
+    assert result.attempts == 2
+    assert h.events == ["planner", "coder", "tester", "reviewer", "coder", "tester", "reviewer"]
+    coder_input_2 = h.inputs[4]
+    assert isinstance(coder_input_2, CoderInput)
+    assert coder_input_2.attempt == 2
+    assert "tester" in {f.source for f in coder_input_2.findings}
+    assert "reviewer" in {f.source for f in coder_input_2.findings}
 
 
 async def test_correction_limit(repo: Path, tmp_path: Path) -> None:

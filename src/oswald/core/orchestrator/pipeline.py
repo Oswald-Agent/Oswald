@@ -199,7 +199,13 @@ class Orchestrator:
 
         def corrections(tests: TestResults, review: ReviewVerdict) -> list[Finding]:
             findings = []
-            if not (tests.passed and tests.exit_code == 0 and tests.tests_failed == 0):
+            clean_tests = (
+                tests.passed
+                and not tests.execution_error
+                and tests.exit_code == 0
+                and tests.tests_failed == 0
+            )
+            if not clean_tests:
                 findings.append(
                     Finding(
                         source="tester",
@@ -368,7 +374,22 @@ class Orchestrator:
                         ReviewVerdict,
                     )
                     latest_review = review
-                    clean_tests = tests.passed and tests.exit_code == 0 and tests.tests_failed == 0
+                    clean_tests = (
+                        tests.passed
+                        and not tests.execution_error
+                        and tests.exit_code == 0
+                        and tests.tests_failed == 0
+                    )
+                    if not clean_tests and review.verdict == "APPROVED":
+                        review = review.model_copy(
+                            update={
+                                "verdict": "CHANGES_REQUESTED",
+                                "blocking_issues": review.blocking_issues
+                                or ["Changes cannot be approved while tests fail"],
+                            }
+                        )
+                        review = await save("review", review, ReviewVerdict)
+                        latest_review = review
                     if review.verdict == "REJECTED":
                         reason = review.summary + ": " + "; ".join(review.blocking_issues)
                         break
