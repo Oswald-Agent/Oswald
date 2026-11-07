@@ -53,13 +53,18 @@ DEFAULT_ECOSYSTEMS: tuple[EcosystemConfig, ...] = (
         env_vars={
             "PYTHONUNBUFFERED": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
+            "LD_LIBRARY_PATH": "/usr/local/lib",
         },
         path_dirs=("/usr/local/bin",),
         copy_stages=(
+            ("/usr/local/bin/python3.12", "/usr/local/bin/python3.12"),
             ("/usr/local/bin/python3", "/usr/local/bin/python3"),
             ("/usr/local/bin/python", "/usr/local/bin/python"),
-            ("/usr/local/bin/pip", "/usr/local/bin/pip"),
+            ("/usr/local/bin/pip3.12", "/usr/local/bin/pip3.12"),
             ("/usr/local/bin/pip3", "/usr/local/bin/pip3"),
+            ("/usr/local/bin/pip", "/usr/local/bin/pip"),
+            ("/usr/local/lib/libpython3.12.so.1.0", "/usr/local/lib/libpython3.12.so.1.0"),
+            ("/usr/local/lib/libpython3.so", "/usr/local/lib/libpython3.so"),
             ("/usr/local/lib/python3.12", "/usr/local/lib/python3.12"),
             ("/usr/local/include/python3.12", "/usr/local/include/python3.12"),
         ),
@@ -143,7 +148,10 @@ class ManifestRegistry:
     ) -> dict[str, str]:
         """Compute merged environment variables and PATH for all specified ecosystems."""
         env: dict[str, str] = {}
-        paths: list[str] = []
+        paths: list[str] = [
+            "/workspace/.venv/bin",
+            "/workspace/node_modules/.bin",
+        ]
         for ecosystem in ecosystems:
             env.update(ecosystem.env_vars)
             for p in ecosystem.path_dirs:

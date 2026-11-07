@@ -38,6 +38,11 @@ def test_generate_composite_dockerfile_node_and_python() -> None:
     assert (
         "COPY --from=python:3.12-slim /usr/local/bin/python3 /usr/local/bin/python3" in dockerfile
     )
+    assert (
+        "COPY --from=python:3.12-slim /usr/local/lib/libpython3.12.so.1.0 /usr/local/lib/libpython3.12.so.1.0"
+        in dockerfile
+    )
+    assert "RUN ldconfig" in dockerfile
     assert 'ENV PATH="' in dockerfile
     assert "/usr/local/bin" in dockerfile
 

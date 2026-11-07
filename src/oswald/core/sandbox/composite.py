@@ -46,6 +46,9 @@ def generate_composite_dockerfile(
                 lines.append(f"COPY --from={eco.base_image} {src} {dst}")
             lines.append("")
 
+    lines.append("RUN ldconfig")
+    lines.append("")
+
     env = default_manifest_registry.resolve_environment_variables(ecosystems)
     if env:
         lines.append("# Toolchain environment variables and paths")

@@ -973,6 +973,9 @@ async def test_orchestrator_dedicated_setup_turn_executes_dependencies(
     h.dependencies = [
         DependencySpec(ecosystem="python", package="requests", version="2.31.0"),
         DependencySpec(ecosystem="node", package="lodash", version="4.17.21"),
+        DependencySpec(ecosystem="go", package="golang.org/x/sync", version="v0.7.0"),
+        DependencySpec(ecosystem="rust", package="serde", version="1.0"),
+        DependencySpec(ecosystem="zig", package="https://github.com/example/zig-pkg.tar.gz"),
     ]
     result = await h.pipeline.run("Install dependencies and fix")
     assert result.status == "SUCCEEDED"
@@ -991,6 +994,15 @@ async def test_orchestrator_dedicated_setup_turn_executes_dependencies(
     assert "--ignore-scripts" in npm_cmd
     assert "lodash@4.17.21" in npm_cmd
 
+    go_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "go")
+    assert go_cmd == ["go", "get", "golang.org/x/sync@v0.7.0"]
+
+    cargo_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "cargo")
+    assert cargo_cmd == ["cargo", "add", "serde", "--version", "1.0"]
+
+    zig_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "zig")
+    assert zig_cmd == ["zig", "fetch", "--save", "https://github.com/example/zig-pkg.tar.gz"]
+
 
 async def test_orchestrator_locks_container_to_network_none_before_coder_and_tester(
     repo: Path, tmp_path: Path
@@ -1004,9 +1016,70 @@ async def test_orchestrator_locks_container_to_network_none_before_coder_and_tes
     assert result.status == "SUCCEEDED"
     assert h.runtime is not None
     assert h.runtime.network_isolated is True
+    assert h.runtime.config.network_disabled is True
 
     cmds = h.runtime.executed_commands
     isolate_idx = cmds.index(["network", "isolate"])
     assert isolate_idx != -1
     venv_idx = cmds.index(["python3", "-m", "venv", "/workspace/.venv"])
     assert venv_idx < isolate_idx
+
+
+async def test_orchestrator_airgaps_container_even_when_allow_network_enabled(
+    repo: Path, tmp_path: Path
+) -> None:
+    """When allow_network is enabled for setup, container is still air-gapped before coder/tester."""
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.network_disabled = False
+    h.dependencies = [
+        DependencySpec(ecosystem="python", package="urllib3", version="2.0.0"),
+    ]
+    result = await h.pipeline.run("Perform isolated edit")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+    assert h.runtime.network_isolated is True
+    assert h.runtime.config.network_disabled is False
+
+    cmds = h.runtime.executed_commands
+    assert ["network", "isolate"] in cmds
+
+
+async def test_orchestrator_dependency_setup_offline_fallbacks(repo: Path, tmp_path: Path) -> None:
+    """Offline fallbacks are invoked when primary dependency download fails."""
+    h = Harness(repo, tmp_path / "reports")
+    h.dependencies = [
+        DependencySpec(ecosystem="python", package="requests"),
+        DependencySpec(ecosystem="node", package="lodash"),
+    ]
+
+    # Intercept sandbox creation to mock responses for failure fallback verification
+    real_sandbox = h.sandbox
+
+    def failing_sandbox(config: SandboxConfig) -> FakeSandboxRuntime:
+        rt = real_sandbox(config)
+        # venv create succeeds
+        rt.queue_response(exit_code=0)
+        # primary pip fails
+        rt.queue_response(exit_code=1, stderr="Network error: unreachable")
+        # fallback pip with --no-index succeeds
+        rt.queue_response(exit_code=0)
+        # primary npm fails
+        rt.queue_response(exit_code=1, stderr="npm error ENOTCACHED")
+        # fallback npm with --offline succeeds
+        rt.queue_response(exit_code=0)
+        return rt
+
+    h.pipeline.sandbox = failing_sandbox
+    result = await h.pipeline.run("Install offline dependencies")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+
+    cmds = h.runtime.executed_commands
+    fallback_pip = next(c for c in cmds if len(c) > 0 and "--no-index" in c)
+    assert fallback_pip[0] == "/workspace/.venv/bin/pip"
+    assert "--find-links" in fallback_pip
+    assert "/host-cache/python" in fallback_pip
+
+    fallback_npm = next(c for c in cmds if len(c) > 0 and "--offline" in c)
+    assert fallback_npm[0] == "npm"
+    assert "/host-cache/node" in fallback_npm

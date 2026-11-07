@@ -152,6 +152,7 @@ class Orchestrator:
         dependencies: Sequence[DependencySpec],
     ) -> None:
         """Execute dedicated setup turn installing dependencies strictly into workspace root."""
+        logger = structlog.get_logger()
         by_eco: dict[str, list[DependencySpec]] = {}
         for dep in dependencies:
             by_eco.setdefault(dep.ecosystem.lower(), []).append(dep)
@@ -173,43 +174,132 @@ class Orchestrator:
                 ]
                 res = await runtime.exec_command(install_cmd)
                 if res.exit_code != 0:
+                    logger.info(
+                        "pipeline.dependency_setup.fallback",
+                        ecosystem="python",
+                        error=res.stderr.strip()[:200],
+                    )
                     fallback_cmd = [
                         "/workspace/.venv/bin/pip",
                         "install",
+                        "--no-index",
+                        "--find-links",
+                        "/host-cache/python",
                         "--only-binary",
                         ":all:",
                         "--cache-dir",
                         "/tmp/pip-cache",  # noqa: S108
                         *pkg_args,
                     ]
-                    await runtime.exec_command(fallback_cmd)
+                    fallback_res = await runtime.exec_command(fallback_cmd)
+                    if fallback_res.exit_code != 0:
+                        online_cmd = [
+                            "/workspace/.venv/bin/pip",
+                            "install",
+                            "--only-binary",
+                            ":all:",
+                            "--cache-dir",
+                            "/tmp/pip-cache",  # noqa: S108
+                            *pkg_args,
+                        ]
+                        await runtime.exec_command(online_cmd)
 
             elif eco_name in {"node", "javascript", "typescript", "npm"}:
                 pkg_args = [f"{d.package}@{d.version}" if d.version else d.package for d in deps]
-                await runtime.exec_command(
-                    [
+                install_cmd = [
+                    "npm",
+                    "install",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund",
+                    "--cache",
+                    "/tmp/npm-cache",  # noqa: S108
+                    "--prefer-offline",
+                    *pkg_args,
+                ]
+                res = await runtime.exec_command(install_cmd)
+                if res.exit_code != 0:
+                    logger.info(
+                        "pipeline.dependency_setup.fallback",
+                        ecosystem="node",
+                        error=res.stderr.strip()[:200],
+                    )
+                    fallback_cmd = [
                         "npm",
                         "install",
                         "--ignore-scripts",
                         "--no-audit",
                         "--no-fund",
                         "--cache",
-                        "/tmp/npm-cache",  # noqa: S108
+                        "/host-cache/node",
+                        "--offline",
                         *pkg_args,
                     ]
-                )
+                    await runtime.exec_command(fallback_cmd)
 
             elif eco_name == "go":
+                go_env = {
+                    "GOPATH": "/tmp/go",  # noqa: S108
+                    "GOCACHE": "/tmp/go-cache",  # noqa: S108
+                }
                 for d in deps:
                     target = f"{d.package}@{d.version}" if d.version else d.package
-                    await runtime.exec_command(["go", "get", target])
+                    res = await runtime.exec_command(["go", "get", target], env=go_env)
+                    if res.exit_code != 0:
+                        logger.info(
+                            "pipeline.dependency_setup.fallback",
+                            ecosystem="go",
+                            target=target,
+                            error=res.stderr.strip()[:200],
+                        )
+                        offline_env = {
+                            **go_env,
+                            "GOPROXY": "file:///host-cache/go,direct",
+                            "GONOSUMDB": "*",
+                        }
+                        await runtime.exec_command(["go", "get", target], env=offline_env)
 
             elif eco_name == "rust":
+                cargo_env = {
+                    "CARGO_HOME": "/tmp/cargo",  # noqa: S108
+                    "CARGO_TARGET_DIR": "/workspace/target",
+                }
                 for d in deps:
                     cmd = ["cargo", "add", d.package]
                     if d.version:
                         cmd.extend(["--version", d.version])
-                    await runtime.exec_command(cmd)
+                    res = await runtime.exec_command(cmd, env=cargo_env)
+                    if res.exit_code != 0:
+                        logger.info(
+                            "pipeline.dependency_setup.fallback",
+                            ecosystem="rust",
+                            package=d.package,
+                            error=res.stderr.strip()[:200],
+                        )
+                        offline_cmd = [*cmd, "--offline"]
+                        await runtime.exec_command(offline_cmd, env=cargo_env)
+
+            elif eco_name == "zig":
+                zig_env = {
+                    "ZIG_GLOBAL_CACHE_DIR": "/tmp/zig-cache",  # noqa: S108
+                    "ZIG_LOCAL_CACHE_DIR": "/workspace/.zig-cache",
+                }
+                for d in deps:
+                    target = f"{d.package}@{d.version}" if d.version else d.package
+                    cmd = ["zig", "fetch", "--save", target]
+                    res = await runtime.exec_command(cmd, env=zig_env)
+                    if res.exit_code != 0:
+                        logger.info(
+                            "pipeline.dependency_setup.fallback",
+                            ecosystem="zig",
+                            target=target,
+                            error=res.stderr.strip()[:200],
+                        )
+                        fallback_env = {
+                            **zig_env,
+                            "ZIG_GLOBAL_CACHE_DIR": "/host-cache/zig",
+                        }
+                        await runtime.exec_command(cmd, env=fallback_env)
 
     async def _run(
         self, request: str, *, base_ref: str, previous: RunResult | None = None
@@ -414,8 +504,7 @@ class Orchestrator:
                     stage = "setup"
                     await invoke(self._setup_workspace_dependencies(runtime, spec.dependencies))
                 # Air-gap execution: lock container to --network none for subsequent Coder edits and Tester loops
-                if self.network_disabled:
-                    await runtime.isolate_network()
+                await runtime.isolate_network()
                 for attempt in range(start_attempt, start_attempt + 2):
                     stage = "coder"
                     changes: CodeChanges | None = None

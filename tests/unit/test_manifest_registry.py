@@ -39,6 +39,10 @@ def test_detect_python_manifests(tmp_path: Path) -> None:
     assert detected[0].name == "python"
     assert detected[0].base_image == "python:3.12-slim"
     assert detected[0].package_manager == "pip"
+    assert detected[0].env_vars.get("LD_LIBRARY_PATH") == "/usr/local/lib"
+    copy_srcs = [src for src, _ in detected[0].copy_stages]
+    assert "/usr/local/bin/python3.12" in copy_srcs
+    assert "/usr/local/lib/libpython3.12.so.1.0" in copy_srcs
 
     reqs_dir = tmp_path / "reqs_repo"
     reqs_dir.mkdir()
@@ -103,6 +107,9 @@ def test_resolve_environment_variables_combines_paths(tmp_path: Path) -> None:
     path = env["PATH"]
     assert "/usr/local/go/bin" in path
     assert "/usr/local/cargo/bin" in path
+    assert "/workspace/.venv/bin" in path
+    assert "/workspace/node_modules/.bin" in path
+    assert path.startswith("/workspace/.venv/bin:/workspace/node_modules/.bin")
 
 
 def test_manifest_registry_extensibility(tmp_path: Path) -> None:

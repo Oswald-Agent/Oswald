@@ -379,7 +379,7 @@ class DockerSandboxRuntime:
         for host_dir, container_mount in self._config.host_cache_mounts.items():
             run_args.extend(["-v", f"{host_dir}:{container_mount}:ro"])
 
-        # Mask /workspace/.git to eliminate host Git hook tampering (SEC-02).
+        # Mask /workspace/.git to eliminate host Git hook tampering.
         # In a git worktree, /workspace/.git is a pointer file; mounting tmpfs directly
         # onto a file fails in runc with ENOTDIR. For files, mask with a read-only bind mount
         # of /dev/null. When .git is a directory or absent, mask with an empty read-only tmpfs.
