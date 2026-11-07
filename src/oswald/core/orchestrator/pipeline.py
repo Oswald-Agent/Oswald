@@ -1,6 +1,7 @@
 """Bounded async pipeline; agents decide content, this module owns lifecycle and routing."""
 
 import asyncio
+import contextlib
 import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -418,34 +419,49 @@ class Orchestrator:
             status, reason = "FAILED", f"{type(exc).__name__}: {exc}"
         finally:
             # Stop even after partial startup; preserve changes if snapshot or teardown fails.
-            if runtime is not None:
-                try:
-                    await call(runtime.stop())
-                except Exception as exc:
-                    cleanup_errors.append(f"sandbox: {exc}")
-            if root is None and manager is not None:
-                candidate = manager.get_worktree_path(task_id)
-                if await asyncio.to_thread(candidate.is_dir):
-                    root = candidate
-            if root is not None and not workspace_restored:
-                cleanup_errors.append(
-                    f"restore failed; saved patch preserved, worktree retained at {root}"
-                )
-            if root is not None and manager is not None and workspace_restored:
-                try:
-                    final_diff = await call(manager.get_diff(task_id))
-                    target = report_dir / "final.patch"
-                    await asyncio.to_thread(target.write_text, final_diff.diff, encoding="utf-8")
-                    patch_path = str(target)
-                except Exception as exc:
-                    cleanup_errors.append(f"patch: {exc}; worktree retained at {root}")
-                if patch_path and not cleanup_errors:
+            async def _teardown() -> None:
+                nonlocal root, patch_path, cleanup_errors
+                if runtime is not None:
                     try:
-                        await call(manager.remove_worktree(task_id))
-                        if await asyncio.to_thread(root.exists):
-                            raise RuntimeError(f"Worktree still exists at {root}")
-                    except Exception as exc:
-                        cleanup_errors.append(f"worktree: {exc}")
+                        await call(runtime.stop())
+                    except BaseException as exc:
+                        cleanup_errors.append(f"sandbox: {exc}")
+                if root is None and manager is not None:
+                    try:
+                        candidate = manager.get_worktree_path(task_id)
+                        if await asyncio.to_thread(candidate.is_dir):
+                            root = candidate
+                    except BaseException as exc:
+                        cleanup_errors.append(f"candidate_worktree: {exc}")
+                if root is not None and not workspace_restored:
+                    cleanup_errors.append(
+                        f"restore failed; saved patch preserved, worktree retained at {root}"
+                    )
+                if root is not None and manager is not None and workspace_restored:
+                    try:
+                        final_diff = await call(manager.get_diff(task_id))
+                        target = report_dir / "final.patch"
+                        await asyncio.to_thread(
+                            target.write_text, final_diff.diff, encoding="utf-8"
+                        )
+                        patch_path = str(target)
+                    except BaseException as exc:
+                        cleanup_errors.append(f"patch: {exc}; worktree retained at {root}")
+                    if patch_path and not cleanup_errors:
+                        try:
+                            await call(manager.remove_worktree(task_id))
+                            if await asyncio.to_thread(root.exists):
+                                raise RuntimeError(f"Worktree still exists at {root}")
+                        except BaseException as exc:
+                            cleanup_errors.append(f"worktree: {exc}")
+
+            teardown_task = asyncio.create_task(_teardown())
+            while not teardown_task.done():
+                with contextlib.suppress(BaseException):
+                    await asyncio.shield(teardown_task)
+            if teardown_task.exception() is not None:
+                cleanup_errors.append(f"teardown: {teardown_task.exception()}")
+
             if cleanup_errors and status != "CANCELLED":
                 status = "FAILED"
                 reason += "; Cleanup failed: " + "; ".join(cleanup_errors)
@@ -466,11 +482,21 @@ class Orchestrator:
                 resume_stage=resume_stage if stage in {"workspace", "sandbox"} else stage,
                 findings=findings,
             )
-            await asyncio.to_thread(
-                (report_dir / "run.json").write_text,
-                result.model_dump_json(indent=2),
-                encoding="utf-8",
-            )
+            while True:
+                try:
+                    await asyncio.shield(
+                        asyncio.to_thread(
+                            (report_dir / "run.json").write_text,
+                            result.model_dump_json(indent=2),
+                            encoding="utf-8",
+                        )
+                    )
+                    break
+                except asyncio.CancelledError:
+                    continue
+                except BaseException as exc:
+                    logger.error("run.report_write_failed", error=str(exc))
+                    break
             totals = result.metrics.model_dump(exclude={"agents"})
             verification: dict[str, str | int] = {}
             if latest_tests is not None:

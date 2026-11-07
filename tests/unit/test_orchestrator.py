@@ -382,6 +382,50 @@ async def test_timeout_and_cancellation(repo: Path, tmp_path: Path) -> None:
     assert any(m["status"] == "CANCELLED" for m in manifests)
 
 
+async def test_secondary_cancellation_shielded_teardown(repo: Path, tmp_path: Path) -> None:
+    """[PIPE-01]: Shield teardown routines with asyncio.shield and catch BaseException so containers
+    and worktrees always clean up on cancellation even when secondary cancellations occur."""
+    h = Harness(repo, tmp_path / "reports")
+    entered_stage = asyncio.Event()
+    entered_cleanup = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+
+    async def hang(_: PlannerInput) -> PlanSpec:
+        entered_stage.set()
+        await asyncio.sleep(100)
+        return PlanSpec.model_construct()
+
+    original_stop = FakeSandboxRuntime.stop
+
+    async def delayed_stop(runtime_self: FakeSandboxRuntime) -> None:
+        entered_cleanup.set()
+        await finish_cleanup.wait()
+        await original_stop(runtime_self)
+
+    base_agents = h.pipeline.agents
+
+    def factory(r: Path, rt: SandboxRuntime, d: WorkspaceDiff) -> Agents:
+        agents = base_agents(r, rt, d)
+        return Agents(AsyncMock(run=hang), agents.coder, agents.tester, agents.reviewer)
+
+    h.pipeline.agents = factory
+
+    with patch.object(FakeSandboxRuntime, "stop", new=delayed_stop):
+        task = asyncio.create_task(h.pipeline.run("Fix"))
+        await entered_stage.wait()
+        task.cancel()
+        await entered_cleanup.wait()
+        # Repeated cancellation while teardown is in flight
+        task.cancel()
+        finish_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert h.runtime and h.runtime.status == SandboxStatus.STOPPED
+    manifests = [json.loads(p.read_text()) for p in h.output.glob("*/run.json")]
+    assert any(m["status"] == "CANCELLED" for m in manifests)
+
+
 async def test_saved_plan_requires_snapshot_match(tmp_path: Path) -> None:
     path = tmp_path / "plan.json"
     path.write_text(
