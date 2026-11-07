@@ -1,5 +1,6 @@
 """Unit tests for Git Worktree Manager."""
 
+import asyncio
 import shutil
 import subprocess
 from pathlib import Path
@@ -254,3 +255,67 @@ async def test_create_worktree_with_stale_branch(manager: WorktreeManager, git_r
     assert ctx.worktree_path.is_dir()
 
     await manager.remove_worktree(task_id)
+
+
+async def test_remove_worktree_task_scoped_without_global_prune(
+    manager: WorktreeManager,
+) -> None:
+    """Verify remove_worktree uses task-scoped git worktree remove and avoids global prune."""
+    task_id = "task-scoped-removal"
+    ctx = await manager.create_worktree(task_id)
+    assert ctx.worktree_path.is_dir()
+
+    executed_git_commands: list[list[str]] = []
+    original_run_git = manager._run_git
+
+    async def tracking_run_git(
+        args: list[str], check: bool = True, cwd: Path | None = None
+    ) -> tuple[int, str, str]:
+        executed_git_commands.append(list(args))
+        return await original_run_git(args, check=check, cwd=cwd)
+
+    manager._run_git = tracking_run_git  # type: ignore[assignment]
+    await manager.remove_worktree(task_id)
+
+    # Verify task-scoped remove was called
+    assert any(
+        cmd[:3] == ["worktree", "remove", "--force"] and str(ctx.worktree_path) in cmd
+        for cmd in executed_git_commands
+    )
+    # Verify global prune was NEVER called
+    assert not any(cmd[:2] == ["worktree", "prune"] for cmd in executed_git_commands)
+    assert not ctx.worktree_path.exists()
+
+
+async def test_create_worktree_failure_rollback_task_scoped_without_prune(
+    manager: WorktreeManager,
+) -> None:
+    """Verify create_worktree rollback cleans up using task-scoped remove without global prune."""
+    task_id = "task-rollback-scoped"
+    executed_git_commands: list[list[str]] = []
+    original_run_git = manager._run_git
+
+    async def failing_run_git(
+        args: list[str], check: bool = True, cwd: Path | None = None
+    ) -> tuple[int, str, str]:
+        executed_git_commands.append(list(args))
+        if args[:2] == ["worktree", "add"]:
+            from oswald.core.vcs.exceptions import WorktreeError
+
+            # Simulate worktree add partially creating directory then failing
+            target_path = Path(args[4])
+            await asyncio.to_thread(target_path.mkdir, parents=True, exist_ok=True)
+            raise WorktreeError("Simulated worktree add failure", task_id=task_id)
+        return await original_run_git(args, check=check, cwd=cwd)
+
+    manager._run_git = failing_run_git  # type: ignore[assignment]
+    with pytest.raises(WorktreeError, match="Failed to create worktree"):
+        await manager.create_worktree(task_id)
+
+    # Verify task-scoped remove was called during rollback
+    assert any(
+        cmd[:3] == ["worktree", "remove", "--force"] and task_id in " ".join(cmd)
+        for cmd in executed_git_commands
+    )
+    # Verify global prune was NEVER called during rollback
+    assert not any(cmd[:2] == ["worktree", "prune"] for cmd in executed_git_commands)
