@@ -880,3 +880,83 @@ async def test_orchestrator_explicit_image_override_precedence(repo: Path, tmp_p
     continued = await h.pipeline.continue_task(result.task_id)
     assert continued.status == "SUCCEEDED"
     assert continued.image == "custom/override:latest"
+
+
+async def test_orchestrator_single_stack_image_resolution(repo: Path, tmp_path: Path) -> None:
+    """Single-stack workspace resolves to detected ecosystem base image for sandbox runtime."""
+    git = shutil.which("git") or "/usr/bin/git"
+    (repo / "package.json").write_text('{"name": "test-pkg"}\n')
+    await asyncio.to_thread(
+        subprocess.run, [git, "add", "package.json"], cwd=repo, check=True, capture_output=True
+    )
+    await asyncio.to_thread(
+        subprocess.run,
+        [git, "commit", "-m", "add package.json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.image = None
+    result = await h.pipeline.run("Build node service")
+    assert result.status == "SUCCEEDED"
+    assert result.image == "node:20-bookworm-slim"
+    assert h.runtime is not None
+    assert h.runtime.config.image == "node:20-bookworm-slim"
+
+
+async def test_orchestrator_polyglot_stack_image_resolution(repo: Path, tmp_path: Path) -> None:
+    """Polyglot workspace with multiple manifests resolves to composite image for Coder and Tester."""
+    git = shutil.which("git") or "/usr/bin/git"
+    (repo / "package.json").write_text('{"name": "test-pkg"}\n')
+    (repo / "Cargo.toml").write_text('[package]\nname = "test-crate"\n')
+    await asyncio.to_thread(
+        subprocess.run,
+        [git, "add", "package.json", "Cargo.toml"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    await asyncio.to_thread(
+        subprocess.run,
+        [git, "commit", "-m", "add polyglot manifests"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.image = None
+    result = await h.pipeline.run("Build polyglot service")
+    assert result.status == "SUCCEEDED"
+    assert "oswald-composite" in result.image
+    assert "node" in result.image and "rust" in result.image
+    assert h.runtime is not None
+    assert h.runtime.config.image == result.image
+
+
+async def test_orchestrator_explicit_image_overrides_detected_manifests(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Explicit image override takes precedence even when manifests exist in workspace."""
+    git = shutil.which("git") or "/usr/bin/git"
+    (repo / "go.mod").write_text("module example.com/pkg\n\ngo 1.23\n")
+    await asyncio.to_thread(
+        subprocess.run, [git, "add", "go.mod"], cwd=repo, check=True, capture_output=True
+    )
+    await asyncio.to_thread(
+        subprocess.run,
+        [git, "commit", "-m", "add go.mod"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.image = "company-corp/go-custom:v2"
+    result = await h.pipeline.run("Build go service")
+    assert result.status == "SUCCEEDED"
+    assert result.image == "company-corp/go-custom:v2"
+    assert h.runtime is not None
+    assert h.runtime.config.image == "company-corp/go-custom:v2"

@@ -27,6 +27,7 @@ from oswald.core.artifacts.models import (
     TestResults,
 )
 from oswald.core.artifacts.storage import ArtifactStore
+from oswald.core.sandbox import resolve_execution_image
 from oswald.core.sandbox.models import SandboxConfig
 from oswald.core.sandbox.protocol import SandboxRuntime
 from oswald.core.vcs.workspace import WorkspaceDiff, WorktreeWorkspaceDiff
@@ -167,7 +168,7 @@ class Orchestrator:
         image = (
             self.image
             if self.image is not None
-            else (previous.image if previous and previous.image else "python:3.12-slim")
+            else (previous.image if previous and previous.image else "")
         )
         status: Literal["SUCCEEDED", "STOPPED", "FAILED", "CANCELLED"] = "STOPPED"
         reason = ""
@@ -277,6 +278,8 @@ class Orchestrator:
             context = await call(manager.create_worktree(task_id, base_ref=base_ref))
             root = context.worktree_path
             base_commit = context.base_ref
+            if not image:
+                image = await resolve_execution_image(root, explicit_override=self.image)
             await asyncio.to_thread(
                 (report_dir / "request.json").write_text,
                 PlannerInput(
