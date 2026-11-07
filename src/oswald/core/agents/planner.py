@@ -18,6 +18,7 @@ from oswald.core.agents.coder import (
     NoOpEventSink,
     RunEvent,
 )
+from oswald.core.agents.compaction import compact_tool_history
 from oswald.core.agents.telemetry import agent_scope, complete, tool_call
 from oswald.core.artifacts.models import PlanSpec, TaskItem
 from oswald.core.codeindex.indexer import CodeIndexer
@@ -254,9 +255,11 @@ class PlannerAgent:
         messages = self._build_initial_messages(input_data)
         schema_retries = 0
         final_draft: dict[str, Any] | None = None
+        tool_call_history: dict[str, tuple[int, str, str]] = {}
 
         for turn in range(1, self.max_turns + 1):
             self.budget_guard.check(input_data.task_id)
+            messages = compact_tool_history(messages, tool_call_history, turn)
 
             try:
                 response = await complete(
@@ -307,6 +310,14 @@ class PlannerAgent:
                         tool.success = not tool_output.startswith(
                             ("Error:", "Tool Execution Error")
                         )
+                    target_arg = (
+                        tc.arguments.get("file_path")
+                        or tc.arguments.get("query")
+                        or tc.arguments.get("directory")
+                        or tc.arguments.get("symbol_name")
+                        or ""
+                    )
+                    tool_call_history[tc.id] = (turn, tc.name, str(target_arg))
                     messages.append(
                         Message(
                             role=Role.TOOL,

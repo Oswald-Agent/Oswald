@@ -10,6 +10,7 @@ from typing import Any, Protocol, runtime_checkable
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
+from oswald.core.agents.compaction import compact_tool_history
 from oswald.core.agents.telemetry import agent_scope, complete, tool_call
 from oswald.core.artifacts.models import CodeChanges, Finding, PlanSpec
 from oswald.core.codeindex.indexer import CodeIndexer
@@ -196,7 +197,8 @@ class CoderAgent:
                 "## Fix Loop Findings (from Tester/Reviewer)\n" + "\n".join(findings_lines)
             )
 
-        user_parts.append(f"## Full Specification (spec.md)\n{input_data.spec.content}")
+        if not input_data.spec.tasks and not input_data.spec.acceptance_criteria:
+            user_parts.append(f"## Full Specification (spec.md)\n{input_data.spec.content}")
 
         return [
             Message(role=Role.SYSTEM, content=system_content),
@@ -349,9 +351,12 @@ class CoderAgent:
         final_draft: dict[str, Any] | None = None
 
         consecutive_tool_failures: dict[str, int] = {}
+        tool_call_history: dict[str, tuple[int, str, str]] = {}
 
         for turn in range(1, self.max_turns + 1):
             self.budget_guard.check(input_data.task_id)
+
+            messages = compact_tool_history(messages, tool_call_history, turn)
 
             try:
                 response = await complete(
@@ -424,6 +429,15 @@ class CoderAgent:
                             payload={"tool": tc.name, "success": success},
                         )
                     )
+
+                    target_arg = (
+                        tc.arguments.get("file_path")
+                        or tc.arguments.get("query")
+                        or tc.arguments.get("directory")
+                        or tc.arguments.get("symbol_name")
+                        or ""
+                    )
+                    tool_call_history[tc.id] = (turn, tc.name, str(target_arg))
 
                     messages.append(
                         Message(

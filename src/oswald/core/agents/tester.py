@@ -20,6 +20,7 @@ from oswald.core.agents.coder import (
     NoOpEventSink,
     RunEvent,
 )
+from oswald.core.agents.compaction import compact_tool_history
 from oswald.core.agents.telemetry import agent_scope, complete, tool_call
 from oswald.core.artifacts.models import CodeChanges, PlanSpec, TestResults
 from oswald.core.codeindex.indexer import CodeIndexer
@@ -122,8 +123,10 @@ class TesterAgent:
         parts = [
             f"# Test Request: Task {data.task_id} (Attempt {data.attempt})",
             f"## Specification Summary\n{data.spec.summary}",
-            f"## Specification Content (spec.md)\n{data.spec.content}",
         ]
+
+        if not data.spec.acceptance_criteria:
+            parts.append(f"## Specification Content (spec.md)\n{data.spec.content}")
 
         if data.spec.acceptance_criteria:
             parts.append(
@@ -468,9 +471,11 @@ class TesterAgent:
         tool_failures: dict[str, int] = {}
         verified_workspaces: dict[str, dict[str, str]] = {}
         report_requested = False
+        tool_call_history: dict[str, tuple[int, str, str]] = {}
 
         for turn in range(1, self.max_turns + 1):
             self.budget_guard.check(data.task_id)
+            messages = compact_tool_history(messages, tool_call_history, turn)
             report_only = turn == self.max_turns or report_requested
             if report_only:
                 messages.append(
@@ -634,6 +639,14 @@ class TesterAgent:
                             payload={"tool": call.name, "success": tool_success},
                         )
                     )
+                    target_arg = (
+                        call.arguments.get("file_path")
+                        or call.arguments.get("query")
+                        or call.arguments.get("directory")
+                        or call.arguments.get("symbol_name")
+                        or ""
+                    )
+                    tool_call_history[call.id] = (turn, call.name, str(target_arg))
                     messages.append(Message(role=Role.TOOL, content=output, tool_call_id=call.id))
                     if command_result is not None and command_result.execution_error:
                         final_draft = {
