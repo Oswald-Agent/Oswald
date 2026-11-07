@@ -160,7 +160,6 @@ async def test_reviewer_rejects_mismatched_tasks(
     [
         "",
         "Not JSON",
-        "```json\n" + _response() + "\n```",
         "[]",
         "{}",
         _response().replace("APPROVED", "LGTM"),
@@ -177,6 +176,79 @@ async def test_reviewer_rejects_invalid_output(
     client.enqueue_text(text)
     with pytest.raises(ValidationError):
         await ReviewerAgent(client, model="fake/reviewer").run(_input(*review_inputs))
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        "```json\n" + _response() + "\n```",
+        "```\n" + _response() + "\n```",
+        "Here is the review:\n```json\n" + _response() + "\n```\nHope that helps!",
+    ],
+)
+async def test_reviewer_accepts_markdown_code_blocks(
+    review_inputs: tuple[PlanSpec, CodeChanges, TestResults], wrapper: str
+) -> None:
+    """[PROMPT-02]: Verify markdown code block wrappers are stripped before JSON validation."""
+    client = FakeLLMClient()
+    client.enqueue_text(wrapper)
+    verdict = await ReviewerAgent(client, model="fake/reviewer").run(_input(*review_inputs))
+    assert verdict.verdict == "APPROVED"
+    assert verdict.summary == "Reviewed the health check"
+
+
+async def test_reviewer_accepts_multiple_code_blocks_with_explanatory_snippet(
+    review_inputs: tuple[PlanSpec, CodeChanges, TestResults],
+) -> None:
+    """[PROMPT-02]: Verify multi-block responses with an explanatory snippet parse the verdict block."""
+    multi_block = (
+        "Here is an explanatory snippet:\n"
+        "```json\n"
+        '{\n  "note": "inspecting changes"\n}\n'
+        "```\n"
+        "And here is the final review verdict:\n"
+        "```json\n" + _response() + "\n```\n"
+    )
+    client = FakeLLMClient()
+    client.enqueue_text(multi_block)
+    agent = ReviewerAgent(client, model="fake/reviewer", max_schema_retries=0)
+    verdict = await agent.run(_input(*review_inputs))
+    assert verdict.verdict == "APPROVED"
+    assert verdict.summary == "Reviewed the health check"
+    assert client.call_count == 1
+
+
+async def test_reviewer_recovers_via_schema_retry(
+    review_inputs: tuple[PlanSpec, CodeChanges, TestResults],
+) -> None:
+    """[PROMPT-02]: Verify Reviewer prompts the model on schema failure and recovers on retry."""
+    client = FakeLLMClient()
+    # Turn 1: Invalid schema
+    client.enqueue_text("I cannot provide JSON yet")
+    # Turn 2: Recovered with valid schema
+    client.enqueue_text(_response())
+
+    agent = ReviewerAgent(client, model="fake/reviewer", max_schema_retries=2)
+    verdict = await agent.run(_input(*review_inputs))
+    assert verdict.verdict == "APPROVED"
+    assert client.call_count == 2
+    # Verify retry prompt was sent
+    retry_msg = client.requests[1].messages[-1].content
+    assert "validation failed" in retry_msg
+
+
+async def test_reviewer_fails_after_exhausting_schema_retries(
+    review_inputs: tuple[PlanSpec, CodeChanges, TestResults],
+) -> None:
+    """[PROMPT-02]: Verify ValidationError is raised when schema retries are exhausted."""
+    client = FakeLLMClient()
+    client.enqueue_text("invalid 1")
+    client.enqueue_text("invalid 2")
+
+    agent = ReviewerAgent(client, model="fake/reviewer", max_schema_retries=1)
+    with pytest.raises(ValidationError):
+        await agent.run(_input(*review_inputs))
+    assert client.call_count == 2
 
 
 @pytest.mark.parametrize(
