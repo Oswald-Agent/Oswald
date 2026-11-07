@@ -7,7 +7,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from oswald.config import Settings
 from oswald.core.agents.coder import CoderAgent
@@ -87,10 +87,13 @@ async def run(args: argparse.Namespace) -> int:
         progress_interval=getattr(args, "progress_interval", 10),
     )
     if getattr(args, "task_id", None):
-        if args.image is not None:
-            result = await orchestrator.continue_task(args.task_id, image=args.image)
-        else:
-            result = await orchestrator.continue_task(args.task_id)
+        kwargs: dict[str, Any] = {}
+        if getattr(args, "image", None) is not None:
+            kwargs["image"] = args.image
+        clarification = getattr(args, "clarification", None)
+        if clarification is not None:
+            kwargs["clarification"] = clarification
+        result = await orchestrator.continue_task(args.task_id, **kwargs)
     else:
         result = await orchestrator.run(args.request, base_ref=args.base_ref)
     print(result.model_dump_json(indent=2))
@@ -142,6 +145,11 @@ def main() -> int:
     planner.add_argument(
         "--planner",
         help="Override Planner with module:function; factory receives isolated workspace Path",
+    )
+    parser.add_argument(
+        "--clarification",
+        default=None,
+        help="Human clarification input to resolve Planner open questions on task continuation",
     )
     # Keep the existing request syntax; only the reserved "continue" command adds an ID.
     parser.add_argument("task_id", nargs="?", help="Saved task ID for the continue command")
