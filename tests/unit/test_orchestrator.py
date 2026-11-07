@@ -19,6 +19,7 @@ from oswald.core.agents.reviewer import ReviewerInput
 from oswald.core.agents.tester import TesterInput
 from oswald.core.artifacts.models import (
     CodeChanges,
+    DependencySpec,
     PlanSpec,
     ReviewVerdict,
     ReviewVerdictStatus,
@@ -56,6 +57,7 @@ class Harness:
         self.inputs: list[object] = []
         self.questions = False
         self.escalated = False
+        self.dependencies: list[DependencySpec] = []
         self.fail_tests = 0
         self.review_status: ReviewVerdictStatus = "APPROVED"
         self.execution_error: str | None = None
@@ -81,6 +83,7 @@ class Harness:
                 task_id=data.task_id,
                 summary="Change value",
                 target_files=["app.py"],
+                dependencies=self.dependencies,
                 has_open_questions=self.questions,
                 open_questions=["Which value?"] if self.questions else [],
                 content="Set value to 2",
@@ -960,3 +963,30 @@ async def test_orchestrator_explicit_image_overrides_detected_manifests(
     assert result.image == "company-corp/go-custom:v2"
     assert h.runtime is not None
     assert h.runtime.config.image == "company-corp/go-custom:v2"
+
+
+async def test_orchestrator_dedicated_setup_turn_executes_dependencies(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Dedicated setup turn executes package managers installed strictly into workspace root."""
+    h = Harness(repo, tmp_path / "reports")
+    h.dependencies = [
+        DependencySpec(ecosystem="python", package="requests", version="2.31.0"),
+        DependencySpec(ecosystem="node", package="lodash", version="4.17.21"),
+    ]
+    result = await h.pipeline.run("Install dependencies and fix")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+
+    cmds = h.runtime.executed_commands
+    assert ["python3", "-m", "venv", "/workspace/.venv"] in cmds
+    pip_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "/workspace/.venv/bin/pip")
+    assert "install" in pip_cmd
+    assert "--only-binary" in pip_cmd
+    assert ":all:" in pip_cmd
+    assert "requests==2.31.0" in pip_cmd
+
+    npm_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "npm")
+    assert "install" in npm_cmd
+    assert "--ignore-scripts" in npm_cmd
+    assert "lodash@4.17.21" in npm_cmd

@@ -59,6 +59,10 @@ class SandboxConfig(BaseModel):
         default_factory=lambda: {"/tmp": "rw,nosuid,nodev,size=512m"},  # noqa: S108
         description="Tmpfs writable scratch mounts for compilers and temporary files",
     )
+    host_cache_mounts: dict[str, str] = Field(
+        default_factory=dict,
+        description="Host directory to container read-only cache mount path mapping, mounted as :ro",
+    )
     max_head_bytes: int = Field(
         default=2 * 1024 * 1024,  # 2 MiB
         description="Maximum initial stdout/stderr bytes retained in memory",

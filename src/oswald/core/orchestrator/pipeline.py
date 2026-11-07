@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -20,6 +20,7 @@ from oswald.core.artifacts.models import (
     ArtifactRef,
     BaseArtifact,
     CodeChanges,
+    DependencySpec,
     Finding,
     PlanSpec,
     Provenance,
@@ -27,7 +28,10 @@ from oswald.core.artifacts.models import (
     TestResults,
 )
 from oswald.core.artifacts.storage import ArtifactStore
-from oswald.core.sandbox import resolve_execution_image
+from oswald.core.sandbox import (
+    default_manifest_registry,
+    resolve_execution_image,
+)
 from oswald.core.sandbox.models import SandboxConfig
 from oswald.core.sandbox.protocol import SandboxRuntime
 from oswald.core.vcs.workspace import WorkspaceDiff, WorktreeWorkspaceDiff
@@ -141,6 +145,71 @@ class Orchestrator:
 
     async def run(self, request: str, *, base_ref: str = "HEAD") -> RunResult:
         return await self._run(request, base_ref=base_ref)
+
+    @staticmethod
+    async def _setup_workspace_dependencies(
+        runtime: SandboxRuntime,
+        dependencies: Sequence[DependencySpec],
+    ) -> None:
+        """Execute dedicated setup turn installing dependencies strictly into workspace root."""
+        by_eco: dict[str, list[DependencySpec]] = {}
+        for dep in dependencies:
+            by_eco.setdefault(dep.ecosystem.lower(), []).append(dep)
+
+        for eco_name, deps in by_eco.items():
+            if eco_name == "python":
+                await runtime.exec_command(["python3", "-m", "venv", "/workspace/.venv"])
+                pkg_args = [f"{d.package}=={d.version}" if d.version else d.package for d in deps]
+                install_cmd = [
+                    "/workspace/.venv/bin/pip",
+                    "install",
+                    "--only-binary",
+                    ":all:",
+                    "--cache-dir",
+                    "/tmp/pip-cache",  # noqa: S108
+                    "--find-links",
+                    "/host-cache/python",
+                    *pkg_args,
+                ]
+                res = await runtime.exec_command(install_cmd)
+                if res.exit_code != 0:
+                    fallback_cmd = [
+                        "/workspace/.venv/bin/pip",
+                        "install",
+                        "--only-binary",
+                        ":all:",
+                        "--cache-dir",
+                        "/tmp/pip-cache",  # noqa: S108
+                        *pkg_args,
+                    ]
+                    await runtime.exec_command(fallback_cmd)
+
+            elif eco_name in {"node", "javascript", "typescript", "npm"}:
+                pkg_args = [f"{d.package}@{d.version}" if d.version else d.package for d in deps]
+                await runtime.exec_command(
+                    [
+                        "npm",
+                        "install",
+                        "--ignore-scripts",
+                        "--no-audit",
+                        "--no-fund",
+                        "--cache",
+                        "/tmp/npm-cache",  # noqa: S108
+                        *pkg_args,
+                    ]
+                )
+
+            elif eco_name == "go":
+                for d in deps:
+                    target = f"{d.package}@{d.version}" if d.version else d.package
+                    await runtime.exec_command(["go", "get", target])
+
+            elif eco_name == "rust":
+                for d in deps:
+                    cmd = ["cargo", "add", d.package]
+                    if d.version:
+                        cmd.extend(["--version", d.version])
+                    await runtime.exec_command(cmd)
 
     async def _run(
         self, request: str, *, base_ref: str, previous: RunResult | None = None
@@ -293,12 +362,24 @@ class Orchestrator:
                     await call(manager.apply_patch(task_id, target))
             workspace_restored = True
             stage = "sandbox"
+
+            def _resolve_host_cache_mounts() -> dict[str, str]:
+                mounts: dict[str, str] = {}
+                for eco in default_manifest_registry.get_ecosystems():
+                    cache_dir = Path(eco.host_cache_path).expanduser().resolve()
+                    if cache_dir.is_dir():
+                        mounts[str(cache_dir)] = f"/host-cache/{eco.name}"
+                return mounts
+
+            host_cache_mounts = await asyncio.to_thread(_resolve_host_cache_mounts)
+
             runtime = self.sandbox(
                 SandboxConfig(
                     task_id=task_id,
                     workspace_path=root,
                     image=image,
                     network_disabled=self.network_disabled,
+                    host_cache_mounts=host_cache_mounts,
                     report_dir=report_dir,
                 )
             )
@@ -329,6 +410,9 @@ class Orchestrator:
             if spec.has_open_questions or spec.open_questions:
                 reason = "Unresolved planning questions: " + "; ".join(spec.open_questions)
             else:
+                if spec.dependencies:
+                    stage = "setup"
+                    await invoke(self._setup_workspace_dependencies(runtime, spec.dependencies))
                 for attempt in range(start_attempt, start_attempt + 2):
                     stage = "coder"
                     changes: CodeChanges | None = None

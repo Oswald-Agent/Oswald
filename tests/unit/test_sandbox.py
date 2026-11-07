@@ -263,6 +263,33 @@ async def test_docker_sandbox_masks_git_worktree_file(
     assert "/dev/null:/workspace/.git:ro" in run_cmd
 
 
+async def test_docker_sandbox_mounts_host_package_caches_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker runtime mounts declared host package cache directories as immutable :ro."""
+    workspace = tmp_path / "workspace_cache"
+    workspace.mkdir()
+    config = SandboxConfig(
+        task_id="task-cache-mount",
+        workspace_path=workspace,
+        host_cache_mounts={"/home/user/.cache/pip": "/host-cache/python"},
+    )
+    runtime = DockerSandboxRuntime(config=config)
+
+    calls: list[list[str]] = []
+
+    async def mock_run_docker(args: object, **kwargs: object) -> tuple[int, str, str]:
+        if isinstance(args, (list, tuple)):
+            calls.append(list(args))
+        return 0, "", ""
+
+    monkeypatch.setattr(runtime, "_run_docker", mock_run_docker)
+    await runtime.start()
+
+    run_cmd = next(c for c in calls if c[0] == "run")
+    assert "/home/user/.cache/pip:/host-cache/python:ro" in run_cmd
+
+
 async def test_docker_sandbox_exec_command_uses_report_dir_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

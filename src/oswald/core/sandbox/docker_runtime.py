@@ -342,6 +342,10 @@ class DockerSandboxRuntime:
             if path != "/workspace/.git":
                 run_args.extend(["--tmpfs", f"{path}:{opts}"])
 
+        # Mount immutable read-only host package caches
+        for host_dir, container_mount in self._config.host_cache_mounts.items():
+            run_args.extend(["-v", f"{host_dir}:{container_mount}:ro"])
+
         # Mask /workspace/.git to eliminate host Git hook tampering (SEC-02).
         # In a git worktree, /workspace/.git is a pointer file; mounting tmpfs directly
         # onto a file fails in runc with ENOTDIR. For files, mask with a read-only bind mount
