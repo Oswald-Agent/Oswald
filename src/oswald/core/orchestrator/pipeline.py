@@ -191,32 +191,41 @@ class Orchestrator:
             )
             return validated
 
-        async def saved[T: BaseArtifact](name: str, model: type[T]) -> T:
-            ref = next(ref for ref in reversed(refs) if ref.name == name)
-            artifact = await self.store.load(ref, model)
+        async def saved[T: BaseArtifact](name: str, model: type[T]) -> T | None:
+            ref = next((ref for ref in reversed(refs) if ref.name == name), None)
+            if ref is None:
+                return None
+            try:
+                artifact = await self.store.load(ref, model)
+            except Exception:
+                return None
             if artifact.task_id != task_id:
                 raise ValueError(f"{name} belongs to another task")
             return artifact
 
-        def corrections(tests: TestResults, review: ReviewVerdict) -> list[Finding]:
+        def corrections(
+            tests: TestResults | None,
+            review: ReviewVerdict | None = None,
+        ) -> list[Finding]:
             findings = []
-            clean_tests = (
-                tests.passed
-                and not tests.execution_error
-                and tests.exit_code == 0
-                and tests.tests_failed == 0
-            )
-            if not clean_tests:
-                findings.append(
-                    Finding(
-                        source="tester",
-                        severity="major",
-                        problem=tests.content,
-                        evidence=tests.output[-500:],
-                        expected_correction="Correct the implementation so the tests pass.",
-                    )
+            if tests is not None:
+                clean_tests = (
+                    tests.passed
+                    and not tests.execution_error
+                    and tests.exit_code == 0
+                    and tests.tests_failed == 0
                 )
-            if review.verdict != "APPROVED" or review.blocking_issues:
+                if not clean_tests:
+                    findings.append(
+                        Finding(
+                            source="tester",
+                            severity="major",
+                            problem=tests.content,
+                            evidence=tests.output[-500:],
+                            expected_correction="Correct the implementation so the tests pass.",
+                        )
+                    )
+            if review is not None and (review.verdict != "APPROVED" or review.blocking_issues):
                 findings.extend(
                     Finding(
                         source="reviewer",
@@ -241,17 +250,21 @@ class Orchestrator:
         logger.info("run.started", task_id=task_id, image=image)
         try:
             if previous and previous.status == "STOPPED" and resume_stage in {"tester", "reviewer"}:
-                findings = corrections(
-                    await saved("test_results", TestResults),
-                    await saved("review", ReviewVerdict),
-                )
-                start_attempt += 1
-                resume_stage = "coder"
+                test_results_art = await saved("test_results", TestResults)
+                review_art = await saved("review", ReviewVerdict)
+                if test_results_art and review_art:
+                    findings = corrections(test_results_art, review_art)
+                    start_attempt += 1
+                    resume_stage = "coder"
+                elif test_results_art is None:
+                    resume_stage = "tester"
+                else:
+                    resume_stage = "reviewer"
             if previous and resume_stage == "coder" and start_attempt > 1 and not findings:
-                findings = corrections(
-                    await saved("test_results", TestResults),
-                    await saved("review", ReviewVerdict),
-                )
+                test_results_art = await saved("test_results", TestResults)
+                review_art = await saved("review", ReviewVerdict)
+                if test_results_art or review_art:
+                    findings = corrections(test_results_art, review_art)
             attempt = start_attempt if previous else 0
             manager = WorktreeManager(repo_path, report_dir / "workspace")
             context = await call(manager.create_worktree(task_id, base_ref=base_ref))
@@ -283,9 +296,12 @@ class Orchestrator:
             diff = WorktreeWorkspaceDiff(manager)
             stage = "planner"
             agents = self.agents(root, runtime, diff)
+            restored_spec = False
+            spec: PlanSpec | None = None
             if previous and resume_stage not in {"workspace", "sandbox", "planner"}:
                 spec = await saved("spec", PlanSpec)
-            else:
+                restored_spec = spec is not None
+            if spec is None:
                 spec = await save(
                     "spec",
                     await invoke(
@@ -305,13 +321,17 @@ class Orchestrator:
             else:
                 for attempt in range(start_attempt, start_attempt + 2):
                     stage = "coder"
+                    changes: CodeChanges | None = None
+                    restored_changes = False
                     if (
                         previous
+                        and restored_spec
                         and attempt == start_attempt
                         and resume_stage in {"tester", "reviewer"}
                     ):
                         changes = await saved("code_changes", CodeChanges)
-                    else:
+                        restored_changes = changes is not None
+                    if changes is None:
                         changes = await save(
                             "code_changes",
                             await invoke(
@@ -331,9 +351,15 @@ class Orchestrator:
                         reason = changes.escalation or changes.summary
                         break
                     stage = "tester"
-                    if previous and attempt == start_attempt and resume_stage == "reviewer":
+                    tests: TestResults | None = None
+                    if (
+                        previous
+                        and restored_changes
+                        and attempt == start_attempt
+                        and resume_stage == "reviewer"
+                    ):
                         tests = await saved("test_results", TestResults)
-                    else:
+                    if tests is None:
                         tests = await save(
                             "test_results",
                             await invoke(

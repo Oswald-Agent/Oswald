@@ -801,3 +801,67 @@ async def test_orchestrator_cleanup_ignores_workspace_oswald_logs(
     # Ensure malicious symlink was NOT copied to report_dir / logs
     copied_link = report_dir / "logs" / "leaked.txt"
     assert not copied_link.exists()
+
+
+async def test_continue_task_tolerant_of_missing_artifacts(repo: Path, tmp_path: Path) -> None:
+    """[PIPE-04]: Make artifact lookups in continue_task tolerant of missing stage artifacts,
+    avoiding StopIteration crashes."""
+    h = Harness(repo, tmp_path / "reports")
+    h.crash = "planner"
+    first = await h.pipeline.run("Fix")
+    assert first.status == "FAILED" and first.stage == "planner"
+    assert not any(a.name == "spec" for a in first.artifacts)
+
+    h.crash = ""
+    h.events.clear()
+    continued = await h.pipeline.continue_task(first.task_id)
+    assert continued.status == "SUCCEEDED"
+    assert "planner" in h.events
+    assert "coder" in h.events
+
+
+async def test_continue_task_tolerant_of_missing_stopped_artifacts(
+    repo: Path, tmp_path: Path
+) -> None:
+    """[PIPE-04]: When resuming stopped tasks with missing test_results or review artifacts,
+    continue_task does not raise StopIteration."""
+    h = Harness(repo, tmp_path / "reports")
+    h.fail_tests = 10
+    result = await h.pipeline.run("Fix")
+    assert result.status == "STOPPED"
+
+    # Keep spec, but strip subsequent stage artifacts from run.json to simulate missing lineage
+    run_path = h.output / result.task_id / "run.json"
+    manifest = json.loads(run_path.read_text())
+    manifest["artifacts"] = [a for a in manifest["artifacts"] if a.get("name") == "spec"]
+    run_path.write_text(json.dumps(manifest))
+
+    h.fail_tests = 0
+    h.events.clear()
+    continued = await h.pipeline.continue_task(result.task_id)
+    assert continued.status == "SUCCEEDED"
+
+
+async def test_continue_task_re_runs_coder_and_tester_if_intermediate_artifacts_missing(
+    repo: Path, tmp_path: Path
+) -> None:
+    """[PIPE-04]: When resume_stage is reviewer but code_changes artifact is missing,
+    Coder and Tester both re-run to avoid using stale test results on new changes."""
+    h = Harness(repo, tmp_path / "reports")
+    h.crash = "reviewer"
+    first = await h.pipeline.run("Fix")
+    assert first.status == "FAILED" and first.stage == "reviewer"
+
+    # Remove code_changes from run.json artifacts
+    run_path = h.output / first.task_id / "run.json"
+    manifest = json.loads(run_path.read_text())
+    manifest["artifacts"] = [a for a in manifest["artifacts"] if a.get("name") != "code_changes"]
+    run_path.write_text(json.dumps(manifest))
+
+    h.crash = ""
+    h.events.clear()
+    continued = await h.pipeline.continue_task(first.task_id)
+    assert continued.status == "SUCCEEDED"
+    assert "coder" in h.events
+    assert "tester" in h.events
+    assert "reviewer" in h.events
