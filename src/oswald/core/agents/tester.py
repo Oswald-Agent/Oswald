@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,16 @@ class TesterInput(BaseModel):
     changes: CodeChanges
     skeleton: str = ""
     baseline_context: str = ""
+
+
+@dataclass(frozen=True)
+class ExecutionLedgerEntry:
+    """Immutable record of a test command execution within the workspace."""
+
+    command: list[str]
+    command_str: str
+    result: CommandResult
+    workspace_hash: str
 
 
 class TesterAgent:
@@ -442,7 +454,8 @@ class TesterAgent:
 
         commands: list[CommandResult] = []
         diagnostics: list[str] = []
-        latest_commands: dict[str, CommandResult] = {}
+        execution_ledger: list[ExecutionLedgerEntry] = []
+        flaky_commands: set[str] = set()
         test_roots: set[str] = set()
         final_draft: dict[str, Any] | None = None
         schema_retries = 0
@@ -556,9 +569,41 @@ class TesterAgent:
                     if command_result is not None:
                         commands.append(command_result)
                         cmd_key = " ".join(command_result.command)
-                        latest_commands[cmd_key] = command_result
+                        state = WorkspaceSnapshot.capture(self.workspace_root)
+                        workspace_hash = hashlib.sha256(
+                            json.dumps(
+                                sorted((p, i.sha256) for p, i in state.files.items())
+                            ).encode("utf-8")
+                        ).hexdigest()
+
+                        entry = ExecutionLedgerEntry(
+                            command=command_result.command,
+                            command_str=cmd_key,
+                            result=command_result,
+                            workspace_hash=workspace_hash,
+                        )
+                        execution_ledger.append(entry)
+
+                        matching_entries = [
+                            e
+                            for e in execution_ledger
+                            if e.command_str == cmd_key and e.workspace_hash == workspace_hash
+                        ]
+                        distinct_exit_codes = {e.result.exit_code for e in matching_entries}
+                        if len(distinct_exit_codes) > 1:
+                            flaky_commands.add(cmd_key)
+                            logger.warning(
+                                "tester.flaky_test_detected",
+                                command=command_result.command,
+                                workspace_hash=workspace_hash,
+                                exit_codes=list(distinct_exit_codes),
+                            )
+                            output += (
+                                "\n\n[FLAKY] Conflicting exit codes detected for this command on "
+                                "identical workspace state."
+                            )
+
                         if command_result.exit_code == 0:
-                            state = WorkspaceSnapshot.capture(self.workspace_root)
                             verified_workspaces[command_key] = {
                                 path: entry.sha256 for path, entry in state.files.items()
                             }
@@ -679,9 +724,27 @@ class TesterAgent:
         if not test_files and commands and all_workspace_tests:
             test_files = sorted(all_workspace_tests)
 
-        # Quantitative metrics parsed from the latest command invocations
-        latest_cmd_list = list(latest_commands.values()) if latest_commands else commands
+        # Quantitative metrics parsed from the latest distinct command invocations
+        latest_by_command: dict[str, ExecutionLedgerEntry] = {}
+        for entry in execution_ledger:
+            latest_by_command[entry.command_str] = entry
+
+        latest_cmd_list = (
+            [e.result for e in latest_by_command.values()] if latest_by_command else commands
+        )
         tests_run, tests_failed = self._extract_metrics(latest_cmd_list)
+
+        # Detect flakiness: any command with conflicting exit codes on the same workspace hash
+        for cmd_str, latest_entry in latest_by_command.items():
+            same_state_entries = [
+                e
+                for e in execution_ledger
+                if e.command_str == cmd_str and e.workspace_hash == latest_entry.workspace_hash
+            ]
+            if len({e.result.exit_code for e in same_state_entries}) > 1:
+                flaky_commands.add(cmd_str)
+
+        is_flaky = bool(flaky_commands)
 
         # Deterministic outcome calculation:
         # 1. At least one test command must have been executed.
@@ -689,9 +752,12 @@ class TesterAgent:
         # 3. No unauthorized non-test mutations were detected.
         # 4. Final completion status must be COMPLETED.
         # 5. Tests were executed (tests_run > 0) with zero failures (tests_failed == 0).
+        # 6. No flaky test commands with conflicting exit codes on identical workspace state.
         has_commands = bool(commands)
-        all_latest_clean = has_commands and all(
-            res.exit_code == 0 for res in latest_commands.values()
+        all_latest_clean = (
+            has_commands
+            and not is_flaky
+            and all(e.result.exit_code == 0 for e in latest_by_command.values())
         )
         no_unauthorized_mutations = not bool(changed)
         is_completed = (final_draft or {}).get("status") == "COMPLETED"
@@ -708,10 +774,10 @@ class TesterAgent:
         # Exit code determination
         if passed:
             exit_code = 0
-        elif latest_commands:
+        elif latest_by_command:
             exit_code = next(
-                (res.exit_code for res in latest_commands.values() if res.exit_code != 0),
-                0 if passed else 1,
+                (e.result.exit_code for e in latest_by_command.values() if e.result.exit_code != 0),
+                1 if is_flaky else (0 if passed else 1),
             )
         else:
             exit_code = 1
@@ -726,6 +792,10 @@ class TesterAgent:
             )
         if not commands:
             output_parts.append("No test command was executed.")
+        if is_flaky:
+            output_parts.append(
+                f"[FLAKY] Conflicting exit codes detected on identical workspace state: {', '.join(sorted(flaky_commands))}"
+            )
         output_text = "\n\n".join(output_parts).strip()
 
         content = final_draft.get(
@@ -741,6 +811,11 @@ class TesterAgent:
             execution_error = "Unauthorized non-test mutations were restored: " + ", ".join(changed)
         elif not has_commands:
             execution_error = "No test command was executed."
+        elif is_flaky:
+            execution_error = (
+                f"Test suite flagged as FLAKY: conflicting exit codes on identical workspace "
+                f"state for: {', '.join(sorted(flaky_commands))}."
+            )
         if execution_error:
             passed = False
             exit_code = exit_code or 1

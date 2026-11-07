@@ -1012,6 +1012,44 @@ async def test_tester_passed_evaluation_requires_positive_test_counts_and_zero_f
     assert result2.tests_failed == 2
 
 
+async def test_execution_ledger_flags_conflicting_exit_codes_as_flaky(
+    workspace: Path,
+) -> None:
+    llm = FakeLLMClient()
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    sandbox.queue_response(exit_code=1, stdout="= 1 failed in 0.01s =")
+    sandbox.queue_response(exit_code=0, stdout="= 1 passed in 0.01s =")
+    await sandbox.start()
+
+    command = ["pytest", "tests/test_flaky.py"]
+    llm.enqueue(
+        LLMResponse(
+            stop_reason=StopReason.TOOL_USE,
+            tool_calls=[
+                ToolCall(id="run-1", name="run_test_command", arguments={"command": command})
+            ],
+        )
+    )
+    llm.enqueue(
+        LLMResponse(
+            stop_reason=StopReason.TOOL_USE,
+            tool_calls=[
+                ToolCall(id="run-2", name="run_test_command", arguments={"command": command})
+            ],
+        )
+    )
+    llm.enqueue_text('{"status": "COMPLETED", "content": "Claimed flaky pass"}')
+
+    agent = TesterAgent(llm, sandbox, workspace)
+    result = await agent.run(_input())
+
+    assert result.passed is False
+    assert result.exit_code != 0
+    assert result.execution_error is not None
+    assert "FLAKY" in result.execution_error
+    assert "[FLAKY]" in result.output
+
+
 @pytest.mark.parametrize(
     "output,expected",
     [
