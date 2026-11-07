@@ -14,17 +14,25 @@ from oswald.core.sandbox.exceptions import (
     SandboxTimeoutError,
 )
 from oswald.core.sandbox.fake import FakeSandboxRuntime
+from oswald.core.sandbox.manifest import (
+    EcosystemConfig,
+    ManifestRegistry,
+    default_manifest_registry,
+)
 from oswald.core.sandbox.models import ExecResult, SandboxConfig, SandboxStatus
 from oswald.core.sandbox.protocol import SandboxRuntime
 
 __all__ = [
     "ContainerNotRunningError",
     "DockerSandboxRuntime",
+    "EcosystemConfig",
     "ExecResult",
     "FakeSandboxRuntime",
+    "ManifestRegistry",
     "SandboxConfig",
     "SandboxError",
     "SandboxRuntime",
     "SandboxStatus",
     "SandboxTimeoutError",
+    "default_manifest_registry",
 ]
