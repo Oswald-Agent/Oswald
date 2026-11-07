@@ -45,6 +45,14 @@ from oswald.core.tools.tester import (
 logger = structlog.get_logger(component="agent.tester")
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "tester_system.md"
 _JSON_BLOCK_REGEX = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_ANSI_ESCAPE_REGEX = re.compile(
+    r"\x1b(?:"
+    r"\][^\x07\x1b]*?(?:\x07|\x1b\\)"
+    r"|\[[0-?]*[ -/]*[@-~]"
+    r"|[P^_][^\x07\x1b]*?(?:\x07|\x1b\\)"
+    r"|[0-9A-Za-z#%()<>=]"
+    r")"
+)
 
 
 class TesterInput(BaseModel):
@@ -361,7 +369,7 @@ class TesterAgent:
         tests_failed = 0
 
         for result in commands:
-            text = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+            text = _ANSI_ESCAPE_REGEX.sub("", result.output)
             # Vitest prints file counts before test counts. Prefer the test summary.
             test_summary = re.search(r"^\s*Tests:?\s+([^\n]+)", text, re.MULTILINE)
             if test_summary:

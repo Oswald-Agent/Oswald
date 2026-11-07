@@ -1134,3 +1134,25 @@ def test_colored_vitest_metrics_use_tests_not_file_counts(
         f"\x1b[2m      Tests \x1b[22m \x1b[32m{summary}\x1b[39m (6)\n"
     )
     assert TesterAgent._extract_metrics([CommandResult(["npm", "test"], 0, output, 1)]) == expected
+
+
+def test_extract_metrics_strips_ansi_csi_osc_and_cursor_control() -> None:
+    from oswald.core.tools.tester.runtime import CommandResult
+
+    jest_output = (
+        "\x1b]0;jest /workspace\x07\x1b[?25l"
+        "\x1b[2K\x1b[1G PASS  tests/index.test.js\n"
+        "\x1b[2K\x1b[1GTests:       1 failed, 4 passed, 5 total\x1b[?25h\n"
+    )
+    assert TesterAgent._extract_metrics([CommandResult(["npm", "test"], 1, jest_output, 0.5)]) == (
+        5,
+        1,
+    )
+
+    pytest_output = (
+        "\x1b]0;pytest\x1b\\\x1b[2K\x1b[1G\x1b[32m= 10 passed, 2 failed in 0.45s =\x1b[0m\n"
+    )
+    assert TesterAgent._extract_metrics([CommandResult(["pytest"], 1, pytest_output, 0.45)]) == (
+        12,
+        2,
+    )
