@@ -10,6 +10,7 @@ from oswald.core.artifacts import (
     ArtifactConcurrencyError,
     ArtifactNotFoundError,
     CodeChanges,
+    DependencySpec,
     FileSystemArtifactStore,
     Finding,
     InMemoryArtifactStore,
@@ -38,11 +39,32 @@ def test_planspec_valid_creation_and_immutability() -> None:
     assert spec.target_files == ["src/routes/health.py"]
     assert spec.has_open_questions is False
     assert spec.open_questions == []
+    assert spec.dependencies == []
     assert "# Plan Spec" in spec.content
 
     # Immutability check
     with pytest.raises(ValidationError):
         spec.summary = "Attempted mutation"
+
+
+def test_planspec_declarative_dependencies() -> None:
+    """Verify PlanSpec accepts declarative, ecosystem-aware dependencies."""
+    dep_py = DependencySpec(ecosystem="python", package="httpx", version=">=0.27.0")
+    dep_node = DependencySpec(ecosystem="node", package="lodash", version="^4.17.21")
+    spec = PlanSpec(
+        task_id="task-dep",
+        summary="Plan with dependencies",
+        dependencies=[dep_py, dep_node],
+        content="# Spec with dependencies",
+    )
+    assert len(spec.dependencies) == 2
+    assert spec.dependencies[0].ecosystem == "python"
+    assert spec.dependencies[0].package == "httpx"
+    assert spec.dependencies[0].version == ">=0.27.0"
+    assert spec.dependencies[1].ecosystem == "node"
+
+    with pytest.raises(ValidationError):
+        spec.dependencies = []
 
 
 def test_planspec_tasks_whitelist_validation() -> None:

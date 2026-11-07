@@ -48,6 +48,10 @@ class SandboxRuntime(Protocol):
         """Gracefully terminate and destroy the sandbox environment."""
         ...
 
+    async def isolate_network(self) -> None:
+        """Lock the container to offline air-gapped networking (--network none)."""
+        ...
+
     async def is_running(self) -> bool:
         """Return True if the sandbox is actively running and ready to accept commands."""
         ...

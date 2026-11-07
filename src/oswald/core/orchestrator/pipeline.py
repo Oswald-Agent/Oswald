@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -20,6 +20,7 @@ from oswald.core.artifacts.models import (
     ArtifactRef,
     BaseArtifact,
     CodeChanges,
+    DependencySpec,
     Finding,
     PlanSpec,
     Provenance,
@@ -27,6 +28,10 @@ from oswald.core.artifacts.models import (
     TestResults,
 )
 from oswald.core.artifacts.storage import ArtifactStore
+from oswald.core.sandbox import (
+    default_manifest_registry,
+    resolve_execution_image,
+)
 from oswald.core.sandbox.models import SandboxConfig
 from oswald.core.sandbox.protocol import SandboxRuntime
 from oswald.core.vcs.workspace import WorkspaceDiff, WorktreeWorkspaceDiff
@@ -90,7 +95,7 @@ class Orchestrator:
         agents: AgentFactory,
         sandbox: Callable[[SandboxConfig], SandboxRuntime],
         *,
-        image: str = "python:3.12-slim",
+        image: str | None = None,
         network_disabled: bool = True,
         stage_timeout: float = 1800,
         progress_interval: float = 10,
@@ -132,12 +137,169 @@ class Orchestrator:
         await asyncio.to_thread(
             shutil.copyfile, report_dir / "run.json", report_dir / f"run-{uuid4().hex}.json"
         )
-        if image is not None:
-            previous = previous.model_copy(update={"image": image})
+        # Explicit CLI or orchestrator image takes absolute precedence; otherwise use continue parameter
+        effective_image = self.image if self.image is not None else image
+        if effective_image is not None:
+            previous = previous.model_copy(update={"image": effective_image})
         return await self._run(data.request, base_ref=data.base_commit, previous=previous)
 
     async def run(self, request: str, *, base_ref: str = "HEAD") -> RunResult:
         return await self._run(request, base_ref=base_ref)
+
+    @staticmethod
+    async def _setup_workspace_dependencies(
+        runtime: SandboxRuntime,
+        dependencies: Sequence[DependencySpec],
+    ) -> None:
+        """Execute dedicated setup turn installing dependencies strictly into workspace root."""
+        logger = structlog.get_logger()
+        by_eco: dict[str, list[DependencySpec]] = {}
+        for dep in dependencies:
+            by_eco.setdefault(dep.ecosystem.lower(), []).append(dep)
+
+        for eco_name, deps in by_eco.items():
+            if eco_name == "python":
+                await runtime.exec_command(["python3", "-m", "venv", "/workspace/.venv"])
+                pkg_args = [f"{d.package}=={d.version}" if d.version else d.package for d in deps]
+                install_cmd = [
+                    "/workspace/.venv/bin/pip",
+                    "install",
+                    "--only-binary",
+                    ":all:",
+                    "--cache-dir",
+                    "/tmp/pip-cache",  # noqa: S108
+                    "--find-links",
+                    "/host-cache/python",
+                    *pkg_args,
+                ]
+                res = await runtime.exec_command(install_cmd)
+                if res.exit_code != 0:
+                    logger.info(
+                        "pipeline.dependency_setup.fallback",
+                        ecosystem="python",
+                        error=res.stderr.strip()[:200],
+                    )
+                    fallback_cmd = [
+                        "/workspace/.venv/bin/pip",
+                        "install",
+                        "--no-index",
+                        "--find-links",
+                        "/host-cache/python",
+                        "--only-binary",
+                        ":all:",
+                        "--cache-dir",
+                        "/tmp/pip-cache",  # noqa: S108
+                        *pkg_args,
+                    ]
+                    fallback_res = await runtime.exec_command(fallback_cmd)
+                    if fallback_res.exit_code != 0:
+                        online_cmd = [
+                            "/workspace/.venv/bin/pip",
+                            "install",
+                            "--only-binary",
+                            ":all:",
+                            "--cache-dir",
+                            "/tmp/pip-cache",  # noqa: S108
+                            *pkg_args,
+                        ]
+                        await runtime.exec_command(online_cmd)
+
+            elif eco_name in {"node", "javascript", "typescript", "npm"}:
+                pkg_args = [f"{d.package}@{d.version}" if d.version else d.package for d in deps]
+                install_cmd = [
+                    "npm",
+                    "install",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund",
+                    "--cache",
+                    "/tmp/npm-cache",  # noqa: S108
+                    "--prefer-offline",
+                    *pkg_args,
+                ]
+                res = await runtime.exec_command(install_cmd)
+                if res.exit_code != 0:
+                    logger.info(
+                        "pipeline.dependency_setup.fallback",
+                        ecosystem="node",
+                        error=res.stderr.strip()[:200],
+                    )
+                    fallback_cmd = [
+                        "npm",
+                        "install",
+                        "--ignore-scripts",
+                        "--no-audit",
+                        "--no-fund",
+                        "--cache",
+                        "/host-cache/node",
+                        "--offline",
+                        *pkg_args,
+                    ]
+                    await runtime.exec_command(fallback_cmd)
+
+            elif eco_name == "go":
+                go_env = {
+                    "GOPATH": "/tmp/go",  # noqa: S108
+                    "GOCACHE": "/tmp/go-cache",  # noqa: S108
+                }
+                for d in deps:
+                    target = f"{d.package}@{d.version}" if d.version else d.package
+                    res = await runtime.exec_command(["go", "get", target], env=go_env)
+                    if res.exit_code != 0:
+                        logger.info(
+                            "pipeline.dependency_setup.fallback",
+                            ecosystem="go",
+                            target=target,
+                            error=res.stderr.strip()[:200],
+                        )
+                        offline_env = {
+                            **go_env,
+                            "GOPROXY": "file:///host-cache/go,direct",
+                            "GONOSUMDB": "*",
+                        }
+                        await runtime.exec_command(["go", "get", target], env=offline_env)
+
+            elif eco_name == "rust":
+                cargo_env = {
+                    "CARGO_HOME": "/tmp/cargo",  # noqa: S108
+                    "CARGO_TARGET_DIR": "/workspace/target",
+                }
+                for d in deps:
+                    cmd = ["cargo", "add", d.package]
+                    if d.version:
+                        cmd.extend(["--version", d.version])
+                    res = await runtime.exec_command(cmd, env=cargo_env)
+                    if res.exit_code != 0:
+                        logger.info(
+                            "pipeline.dependency_setup.fallback",
+                            ecosystem="rust",
+                            package=d.package,
+                            error=res.stderr.strip()[:200],
+                        )
+                        offline_cmd = [*cmd, "--offline"]
+                        await runtime.exec_command(offline_cmd, env=cargo_env)
+
+            elif eco_name == "zig":
+                zig_env = {
+                    "ZIG_GLOBAL_CACHE_DIR": "/tmp/zig-cache",  # noqa: S108
+                    "ZIG_LOCAL_CACHE_DIR": "/workspace/.zig-cache",
+                }
+                for d in deps:
+                    target = f"{d.package}@{d.version}" if d.version else d.package
+                    cmd = ["zig", "fetch", "--save", target]
+                    res = await runtime.exec_command(cmd, env=zig_env)
+                    if res.exit_code != 0:
+                        logger.info(
+                            "pipeline.dependency_setup.fallback",
+                            ecosystem="zig",
+                            target=target,
+                            error=res.stderr.strip()[:200],
+                        )
+                        fallback_env = {
+                            **zig_env,
+                            "ZIG_GLOBAL_CACHE_DIR": "/host-cache/zig",
+                        }
+                        await runtime.exec_command(cmd, env=fallback_env)
 
     async def _run(
         self, request: str, *, base_ref: str, previous: RunResult | None = None
@@ -161,7 +323,12 @@ class Orchestrator:
         workspace_restored = previous is None or not previous.patch_path
         start_attempt = max(previous.attempts, 1) if previous else 1
         repo_path = Path(previous.repo_path) if previous and previous.repo_path else self.repo_path
-        image = previous.image if previous and previous.image else self.image
+        # Explicit image override takes absolute precedence across all pipeline stages
+        image = (
+            self.image
+            if self.image is not None
+            else (previous.image if previous and previous.image else "")
+        )
         status: Literal["SUCCEEDED", "STOPPED", "FAILED", "CANCELLED"] = "STOPPED"
         reason = ""
         patch_path = previous.patch_path if previous else ""
@@ -270,6 +437,8 @@ class Orchestrator:
             context = await call(manager.create_worktree(task_id, base_ref=base_ref))
             root = context.worktree_path
             base_commit = context.base_ref
+            if not image:
+                image = await resolve_execution_image(root, explicit_override=self.image)
             await asyncio.to_thread(
                 (report_dir / "request.json").write_text,
                 PlannerInput(
@@ -283,12 +452,24 @@ class Orchestrator:
                     await call(manager.apply_patch(task_id, target))
             workspace_restored = True
             stage = "sandbox"
+
+            def _resolve_host_cache_mounts() -> dict[str, str]:
+                mounts: dict[str, str] = {}
+                for eco in default_manifest_registry.get_ecosystems():
+                    cache_dir = Path(eco.host_cache_path).expanduser().resolve()
+                    if cache_dir.is_dir():
+                        mounts[str(cache_dir)] = f"/host-cache/{eco.name}"
+                return mounts
+
+            host_cache_mounts = await asyncio.to_thread(_resolve_host_cache_mounts)
+
             runtime = self.sandbox(
                 SandboxConfig(
                     task_id=task_id,
                     workspace_path=root,
                     image=image,
                     network_disabled=self.network_disabled,
+                    host_cache_mounts=host_cache_mounts,
                     report_dir=report_dir,
                 )
             )
@@ -319,6 +500,11 @@ class Orchestrator:
             if spec.has_open_questions or spec.open_questions:
                 reason = "Unresolved planning questions: " + "; ".join(spec.open_questions)
             else:
+                if spec.dependencies:
+                    stage = "setup"
+                    await invoke(self._setup_workspace_dependencies(runtime, spec.dependencies))
+                # Air-gap execution: lock container to --network none for subsequent Coder edits and Tester loops
+                await runtime.isolate_network()
                 for attempt in range(start_attempt, start_attempt + 2):
                     stage = "coder"
                     changes: CodeChanges | None = None

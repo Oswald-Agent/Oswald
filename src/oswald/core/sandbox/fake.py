@@ -22,6 +22,7 @@ class FakeSandboxRuntime:
         self._config = config
         self._execute_locally = execute_locally
         self._status: SandboxStatus = SandboxStatus.PENDING
+        self.network_isolated: bool = False
         self.executed_commands: list[list[str]] = []
         self.executed_envs: list[dict[str, str]] = []
         self._mock_responses: deque[ExecResult] = deque()
@@ -64,6 +65,11 @@ class FakeSandboxRuntime:
 
     async def start(self) -> None:
         self._status = SandboxStatus.RUNNING
+
+    async def isolate_network(self) -> None:
+        """Simulate locking the container to offline air-gapped networking."""
+        self.network_isolated = True
+        self.executed_commands.append(["network", "isolate"])
 
     async def exec_command(
         self,

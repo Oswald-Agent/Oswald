@@ -148,6 +148,39 @@ class StreamCollector:
         self.close()
 
 
+async def run_docker_command(
+    args: Sequence[str],
+    docker_bin: str = "docker",
+    timeout_seconds: float = 120.0,
+    check: bool = False,
+) -> tuple[int, str, str]:
+    """Execute raw docker command asynchronously via authorized docker runtime module."""
+    cmd = [docker_bin, *args]
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout_seconds
+        )
+        exit_code = proc.returncode if proc.returncode is not None else 1
+        return (
+            exit_code,
+            stdout_bytes.decode(errors="replace"),
+            stderr_bytes.decode(errors="replace"),
+        )
+    except Exception as exc:
+        if proc is not None and proc.returncode is None:
+            with suppress(Exception):
+                proc.kill()
+        if check:
+            raise SandboxError(f"Docker command failed: {' '.join(cmd)}: {exc}") from exc
+        return 1, "", str(exc)
+
+
 class DockerSandboxRuntime:
     """Hardened Docker sandbox implementation conforming to SandboxRuntime protocol."""
 
@@ -342,7 +375,11 @@ class DockerSandboxRuntime:
             if path != "/workspace/.git":
                 run_args.extend(["--tmpfs", f"{path}:{opts}"])
 
-        # Mask /workspace/.git to eliminate host Git hook tampering (SEC-02).
+        # Mount immutable read-only host package caches
+        for host_dir, container_mount in self._config.host_cache_mounts.items():
+            run_args.extend(["-v", f"{host_dir}:{container_mount}:ro"])
+
+        # Mask /workspace/.git to eliminate host Git hook tampering.
         # In a git worktree, /workspace/.git is a pointer file; mounting tmpfs directly
         # onto a file fails in runc with ENOTDIR. For files, mask with a read-only bind mount
         # of /dev/null. When .git is a directory or absent, mask with an empty read-only tmpfs.
@@ -455,6 +492,33 @@ class DockerSandboxRuntime:
                 task_id=self._config.task_id,
             )
         self._status = SandboxStatus.STOPPED
+
+    async def isolate_network(self) -> None:
+        """Lock the running container to offline air-gapped networking (--network none)."""
+        if self._status != SandboxStatus.RUNNING:
+            return
+
+        exit_code, stdout, _ = await self._run_docker(
+            [
+                "inspect",
+                "-f",
+                "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+                self.container_name,
+            ],
+            check=False,
+        )
+        if exit_code == 0:
+            networks = [
+                net.strip() for net in stdout.split() if net.strip() and net.strip() != "none"
+            ]
+            for net in networks:
+                await self._run_docker(
+                    ["network", "disconnect", net, self.container_name], check=False
+                )
+        else:
+            await self._run_docker(
+                ["network", "disconnect", "bridge", self.container_name], check=False
+            )
 
     async def is_running(self) -> bool:
         """Check if container is active and running."""

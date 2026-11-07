@@ -19,6 +19,7 @@ from oswald.core.agents.reviewer import ReviewerInput
 from oswald.core.agents.tester import TesterInput
 from oswald.core.artifacts.models import (
     CodeChanges,
+    DependencySpec,
     PlanSpec,
     ReviewVerdict,
     ReviewVerdictStatus,
@@ -56,6 +57,7 @@ class Harness:
         self.inputs: list[object] = []
         self.questions = False
         self.escalated = False
+        self.dependencies: list[DependencySpec] = []
         self.fail_tests = 0
         self.review_status: ReviewVerdictStatus = "APPROVED"
         self.execution_error: str | None = None
@@ -81,6 +83,7 @@ class Harness:
                 task_id=data.task_id,
                 summary="Change value",
                 target_files=["app.py"],
+                dependencies=self.dependencies,
                 has_open_questions=self.questions,
                 open_questions=["Which value?"] if self.questions else [],
                 content="Set value to 2",
@@ -865,3 +868,218 @@ async def test_continue_task_re_runs_coder_and_tester_if_intermediate_artifacts_
     assert "coder" in h.events
     assert "tester" in h.events
     assert "reviewer" in h.events
+
+
+async def test_orchestrator_explicit_image_override_precedence(repo: Path, tmp_path: Path) -> None:
+    """Explicit image override takes absolute precedence across pipeline run and continue_task."""
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.image = "custom/override:latest"
+    result = await h.pipeline.run("Fix something")
+    assert result.status == "SUCCEEDED"
+    assert result.image == "custom/override:latest"
+    assert h.runtime is not None
+    assert h.runtime.config.image == "custom/override:latest"
+
+    continued = await h.pipeline.continue_task(result.task_id)
+    assert continued.status == "SUCCEEDED"
+    assert continued.image == "custom/override:latest"
+
+
+async def test_orchestrator_single_stack_image_resolution(repo: Path, tmp_path: Path) -> None:
+    """Single-stack workspace resolves to detected ecosystem base image for sandbox runtime."""
+    git = shutil.which("git") or "/usr/bin/git"
+    (repo / "package.json").write_text('{"name": "test-pkg"}\n')
+    await asyncio.to_thread(
+        subprocess.run, [git, "add", "package.json"], cwd=repo, check=True, capture_output=True
+    )
+    await asyncio.to_thread(
+        subprocess.run,
+        [git, "commit", "-m", "add package.json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.image = None
+    result = await h.pipeline.run("Build node service")
+    assert result.status == "SUCCEEDED"
+    assert result.image == "node:20-bookworm-slim"
+    assert h.runtime is not None
+    assert h.runtime.config.image == "node:20-bookworm-slim"
+
+
+async def test_orchestrator_polyglot_stack_image_resolution(repo: Path, tmp_path: Path) -> None:
+    """Polyglot workspace with multiple manifests resolves to composite image for Coder and Tester."""
+    git = shutil.which("git") or "/usr/bin/git"
+    (repo / "package.json").write_text('{"name": "test-pkg"}\n')
+    (repo / "Cargo.toml").write_text('[package]\nname = "test-crate"\n')
+    await asyncio.to_thread(
+        subprocess.run,
+        [git, "add", "package.json", "Cargo.toml"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    await asyncio.to_thread(
+        subprocess.run,
+        [git, "commit", "-m", "add polyglot manifests"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.image = None
+    result = await h.pipeline.run("Build polyglot service")
+    assert result.status == "SUCCEEDED"
+    assert "oswald-composite" in result.image
+    assert "node" in result.image and "rust" in result.image
+    assert h.runtime is not None
+    assert h.runtime.config.image == result.image
+
+
+async def test_orchestrator_explicit_image_overrides_detected_manifests(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Explicit image override takes precedence even when manifests exist in workspace."""
+    git = shutil.which("git") or "/usr/bin/git"
+    (repo / "go.mod").write_text("module example.com/pkg\n\ngo 1.23\n")
+    await asyncio.to_thread(
+        subprocess.run, [git, "add", "go.mod"], cwd=repo, check=True, capture_output=True
+    )
+    await asyncio.to_thread(
+        subprocess.run,
+        [git, "commit", "-m", "add go.mod"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.image = "company-corp/go-custom:v2"
+    result = await h.pipeline.run("Build go service")
+    assert result.status == "SUCCEEDED"
+    assert result.image == "company-corp/go-custom:v2"
+    assert h.runtime is not None
+    assert h.runtime.config.image == "company-corp/go-custom:v2"
+
+
+async def test_orchestrator_dedicated_setup_turn_executes_dependencies(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Dedicated setup turn executes package managers installed strictly into workspace root."""
+    h = Harness(repo, tmp_path / "reports")
+    h.dependencies = [
+        DependencySpec(ecosystem="python", package="requests", version="2.31.0"),
+        DependencySpec(ecosystem="node", package="lodash", version="4.17.21"),
+        DependencySpec(ecosystem="go", package="golang.org/x/sync", version="v0.7.0"),
+        DependencySpec(ecosystem="rust", package="serde", version="1.0"),
+        DependencySpec(ecosystem="zig", package="https://github.com/example/zig-pkg.tar.gz"),
+    ]
+    result = await h.pipeline.run("Install dependencies and fix")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+
+    cmds = h.runtime.executed_commands
+    assert ["python3", "-m", "venv", "/workspace/.venv"] in cmds
+    pip_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "/workspace/.venv/bin/pip")
+    assert "install" in pip_cmd
+    assert "--only-binary" in pip_cmd
+    assert ":all:" in pip_cmd
+    assert "requests==2.31.0" in pip_cmd
+
+    npm_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "npm")
+    assert "install" in npm_cmd
+    assert "--ignore-scripts" in npm_cmd
+    assert "lodash@4.17.21" in npm_cmd
+
+    go_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "go")
+    assert go_cmd == ["go", "get", "golang.org/x/sync@v0.7.0"]
+
+    cargo_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "cargo")
+    assert cargo_cmd == ["cargo", "add", "serde", "--version", "1.0"]
+
+    zig_cmd = next(c for c in cmds if len(c) > 0 and c[0] == "zig")
+    assert zig_cmd == ["zig", "fetch", "--save", "https://github.com/example/zig-pkg.tar.gz"]
+
+
+async def test_orchestrator_locks_container_to_network_none_before_coder_and_tester(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Air-gap execution: container is locked to --network none before Coder and Tester runs."""
+    h = Harness(repo, tmp_path / "reports")
+    h.dependencies = [
+        DependencySpec(ecosystem="python", package="urllib3", version="2.0.0"),
+    ]
+    result = await h.pipeline.run("Perform isolated edit")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+    assert h.runtime.network_isolated is True
+    assert h.runtime.config.network_disabled is True
+
+    cmds = h.runtime.executed_commands
+    isolate_idx = cmds.index(["network", "isolate"])
+    assert isolate_idx != -1
+    venv_idx = cmds.index(["python3", "-m", "venv", "/workspace/.venv"])
+    assert venv_idx < isolate_idx
+
+
+async def test_orchestrator_airgaps_container_even_when_allow_network_enabled(
+    repo: Path, tmp_path: Path
+) -> None:
+    """When allow_network is enabled for setup, container is still air-gapped before coder/tester."""
+    h = Harness(repo, tmp_path / "reports")
+    h.pipeline.network_disabled = False
+    h.dependencies = [
+        DependencySpec(ecosystem="python", package="urllib3", version="2.0.0"),
+    ]
+    result = await h.pipeline.run("Perform isolated edit")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+    assert h.runtime.network_isolated is True
+    assert h.runtime.config.network_disabled is False
+
+    cmds = h.runtime.executed_commands
+    assert ["network", "isolate"] in cmds
+
+
+async def test_orchestrator_dependency_setup_offline_fallbacks(repo: Path, tmp_path: Path) -> None:
+    """Offline fallbacks are invoked when primary dependency download fails."""
+    h = Harness(repo, tmp_path / "reports")
+    h.dependencies = [
+        DependencySpec(ecosystem="python", package="requests"),
+        DependencySpec(ecosystem="node", package="lodash"),
+    ]
+
+    # Intercept sandbox creation to mock responses for failure fallback verification
+    real_sandbox = h.sandbox
+
+    def failing_sandbox(config: SandboxConfig) -> FakeSandboxRuntime:
+        rt = real_sandbox(config)
+        # venv create succeeds
+        rt.queue_response(exit_code=0)
+        # primary pip fails
+        rt.queue_response(exit_code=1, stderr="Network error: unreachable")
+        # fallback pip with --no-index succeeds
+        rt.queue_response(exit_code=0)
+        # primary npm fails
+        rt.queue_response(exit_code=1, stderr="npm error ENOTCACHED")
+        # fallback npm with --offline succeeds
+        rt.queue_response(exit_code=0)
+        return rt
+
+    h.pipeline.sandbox = failing_sandbox
+    result = await h.pipeline.run("Install offline dependencies")
+    assert result.status == "SUCCEEDED"
+    assert h.runtime is not None
+
+    cmds = h.runtime.executed_commands
+    fallback_pip = next(c for c in cmds if len(c) > 0 and "--no-index" in c)
+    assert fallback_pip[0] == "/workspace/.venv/bin/pip"
+    assert "--find-links" in fallback_pip
+    assert "/host-cache/python" in fallback_pip
+
+    fallback_npm = next(c for c in cmds if len(c) > 0 and "--offline" in c)
+    assert fallback_npm[0] == "npm"
+    assert "/host-cache/node" in fallback_npm

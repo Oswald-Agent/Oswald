@@ -46,6 +46,18 @@ class TaskItem(BaseModel):
     details: str = Field(default="", description="Optional additional instructions or context")
 
 
+class DependencySpec(BaseModel):
+    """Declarative dependency declaration produced by Planner inside PlanSpec."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ecosystem: str = Field(
+        min_length=1, description="Target language ecosystem (e.g. python, node, go, rust)"
+    )
+    package: str = Field(min_length=1, description="Dependency package name or specifier")
+    version: str | None = Field(default=None, description="Optional version constraint")
+
+
 class PlanSpec(BaseArtifact):
     """Planner Agent output artifact (spec.md contract).
 
@@ -80,6 +92,10 @@ class PlanSpec(BaseArtifact):
     open_questions: list[str] = Field(
         default_factory=list,
         description="Unresolved questions for the requester if has_open_questions is True",
+    )
+    dependencies: list[DependencySpec] = Field(
+        default_factory=list,
+        description="Declarative package dependencies to install into workspace during setup turn",
     )
     content: str = Field(
         min_length=1,

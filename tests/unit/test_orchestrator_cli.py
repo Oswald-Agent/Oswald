@@ -36,6 +36,64 @@ def test_cli_allow_network_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.allow_network is True
 
 
+def test_cli_image_override_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["oswald", "Do something", "--image", "custom/toolchain:v1"])
+    with patch("oswald.cli.__main__.run", new_callable=AsyncMock, return_value=0) as execute:
+        assert main() == 0
+    args = execute.call_args.args[0]
+    assert args.image == "custom/toolchain:v1"
+
+
+async def test_cli_forwards_explicit_image_to_orchestrator(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        repo=str(tmp_path),
+        output=str(tmp_path / "reports"),
+        plan=None,
+        planner=None,
+        image="custom/toolchain:test",
+        stage_timeout=60,
+        request="Test request",
+        base_ref="HEAD",
+    )
+    result = RunResult(
+        task_id="test-task",
+        status="SUCCEEDED",
+        stage="reviewer",
+        reason="ok",
+        attempts=1,
+    )
+    with patch("oswald.cli.__main__.Orchestrator") as pipeline:
+        pipeline.return_value.run = AsyncMock(return_value=result)
+        code = await run(args)
+    assert code == 0
+    assert pipeline.call_args.kwargs.get("image") == "custom/toolchain:test"
+
+
+async def test_cli_forwards_none_image_when_omitted(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        repo=str(tmp_path),
+        output=str(tmp_path / "reports"),
+        plan=None,
+        planner=None,
+        image=None,
+        stage_timeout=60,
+        request="Test request",
+        base_ref="HEAD",
+    )
+    result = RunResult(
+        task_id="test-task",
+        status="SUCCEEDED",
+        stage="reviewer",
+        reason="ok",
+        attempts=1,
+    )
+    with patch("oswald.cli.__main__.Orchestrator") as pipeline:
+        pipeline.return_value.run = AsyncMock(return_value=result)
+        code = await run(args)
+    assert code == 0
+    assert pipeline.call_args.kwargs.get("image") is None
+
+
 @pytest.mark.parametrize("success", [True, False])
 @pytest.mark.parametrize("saved_plan", [False, True])
 async def test_cli_composes_real_agents_and_returns_exit_code(
