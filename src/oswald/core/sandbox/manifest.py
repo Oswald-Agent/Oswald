@@ -163,4 +163,39 @@ class ManifestRegistry:
         return self.DEFAULT_IMAGE
 
 
+def compute_composite_tag(ecosystems: Sequence[EcosystemConfig]) -> str:
+    """Compute deterministic image tag for a combination of ecosystems."""
+    names = sorted(e.name for e in ecosystems)
+    return f"oswald-composite:{'-'.join(names)}"
+
+
+async def resolve_execution_image(
+    root: Path,
+    explicit_override: str | None = None,
+    registry: ManifestRegistry | None = None,
+) -> str:
+    """Resolve container execution image for workspace root.
+
+    Precedence order:
+    1. Explicit CLI / constructor override.
+    2. Single-stack workspace base image.
+    3. Ephemeral composite image for polyglot workspaces.
+    4. Default python:3.12-slim when no manifests detected.
+    """
+    if explicit_override is not None and explicit_override.strip():
+        return explicit_override.strip()
+
+    reg = registry or default_manifest_registry
+    detected = reg.detect_ecosystems(root)
+    if not detected:
+        return reg.DEFAULT_IMAGE
+    if len(detected) == 1:
+        return detected[0].base_image
+
+    composite_tag = compute_composite_tag(detected)
+    from oswald.core.sandbox.composite import ensure_composite_image
+
+    return await ensure_composite_image(detected, tag=composite_tag)
+
+
 default_manifest_registry = ManifestRegistry()
