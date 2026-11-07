@@ -5,7 +5,6 @@ with build-essential, setting appropriate toolchain environment variables withou
 language pairs.
 """
 
-import asyncio
 import shutil
 import tempfile
 from collections.abc import Sequence
@@ -13,6 +12,7 @@ from pathlib import Path
 
 import structlog
 
+from oswald.core.sandbox.docker_runtime import run_docker_command
 from oswald.core.sandbox.manifest import EcosystemConfig, default_manifest_registry
 
 
@@ -66,19 +66,10 @@ async def ensure_composite_image(
     if not shutil.which(docker_bin):
         return image_tag
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            docker_bin,
-            "image",
-            "inspect",
-            image_tag,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        if proc.returncode == 0:
-            return image_tag
-    except Exception:
+    inspect_code, _, _ = await run_docker_command(
+        ["image", "inspect", image_tag], docker_bin=docker_bin
+    )
+    if inspect_code == 0:
         return image_tag
 
     dockerfile_content = generate_composite_dockerfile(ecosystems)
@@ -86,24 +77,16 @@ async def ensure_composite_image(
         with tempfile.TemporaryDirectory() as tmpdir:
             df_path = Path(tmpdir) / "Dockerfile"
             df_path.write_text(dockerfile_content, encoding="utf-8")
-            build_proc = await asyncio.create_subprocess_exec(
-                docker_bin,
-                "build",
-                "-t",
-                image_tag,
-                "-f",
-                str(df_path),
-                tmpdir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            build_code, _, err = await run_docker_command(
+                ["build", "-t", image_tag, "-f", str(df_path), tmpdir],
+                docker_bin=docker_bin,
             )
-            _, err = await build_proc.communicate()
-            if build_proc.returncode != 0:
+            if build_code != 0:
                 logger = structlog.get_logger()
                 logger.warning(
                     "composite_image.build_failed",
                     tag=image_tag,
-                    error=err.decode(errors="replace").strip(),
+                    error=err.strip(),
                 )
     except Exception as exc:
         logger = structlog.get_logger()

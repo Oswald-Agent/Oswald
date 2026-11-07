@@ -148,6 +148,39 @@ class StreamCollector:
         self.close()
 
 
+async def run_docker_command(
+    args: Sequence[str],
+    docker_bin: str = "docker",
+    timeout_seconds: float = 120.0,
+    check: bool = False,
+) -> tuple[int, str, str]:
+    """Execute raw docker command asynchronously via authorized docker runtime module."""
+    cmd = [docker_bin, *args]
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout_seconds
+        )
+        exit_code = proc.returncode if proc.returncode is not None else 1
+        return (
+            exit_code,
+            stdout_bytes.decode(errors="replace"),
+            stderr_bytes.decode(errors="replace"),
+        )
+    except Exception as exc:
+        if proc is not None and proc.returncode is None:
+            with suppress(Exception):
+                proc.kill()
+        if check:
+            raise SandboxError(f"Docker command failed: {' '.join(cmd)}: {exc}") from exc
+        return 1, "", str(exc)
+
+
 class DockerSandboxRuntime:
     """Hardened Docker sandbox implementation conforming to SandboxRuntime protocol."""
 

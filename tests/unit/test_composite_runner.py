@@ -91,16 +91,16 @@ async def test_ensure_composite_image_returns_existing_tag() -> None:
     node = next(e for e in DEFAULT_ECOSYSTEMS if e.name == "node")
     python = next(e for e in DEFAULT_ECOSYSTEMS if e.name == "python")
 
-    mock_proc = AsyncMock()
-    mock_proc.communicate.return_value = (b"", b"")
-    mock_proc.returncode = 0
-
     with (
         patch("shutil.which", return_value="/usr/bin/docker"),
-        patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec,
+        patch(
+            "oswald.core.sandbox.composite.run_docker_command",
+            new_callable=AsyncMock,
+            return_value=(0, "", ""),
+        ) as mock_run_docker,
     ):
         tag = await ensure_composite_image([node, python])
         assert tag == "oswald-composite:node-python"
         # Only inspect was called, build was not called
-        assert mock_exec.call_count == 1
-        assert "inspect" in mock_exec.call_args.args
+        assert mock_run_docker.call_count == 1
+        assert "inspect" in mock_run_docker.call_args.args[0]
