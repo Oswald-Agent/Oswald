@@ -230,6 +230,43 @@ async def test_failing_tests_coerces_approved_reviewer_verdict_to_retry(
     assert "reviewer" in {f.source for f in coder_input_2.findings}
 
 
+async def test_rejection_on_attempt_1_retries_and_succeeds_on_attempt_2(
+    repo: Path, tmp_path: Path
+) -> None:
+    """[PIPE-03]: In pipeline.py, only abort on review.verdict == 'REJECTED' if attempts
+    are exhausted; on earlier attempts, convert rejections into actionable findings for Attempt 2."""
+    h = Harness(repo, tmp_path / "reports")
+    original_agents = h.pipeline.agents
+
+    def factory(root: Path, runtime: SandboxRuntime, diff: WorkspaceDiff) -> Agents:
+        agents = original_agents(root, runtime, diff)
+
+        async def dynamic_review(data: ReviewerInput) -> ReviewVerdict:
+            h.events.append("reviewer")
+            h.inputs.append(data)
+            verdict: ReviewVerdictStatus = "REJECTED" if data.attempt == 1 else "APPROVED"
+            return ReviewVerdict(
+                task_id=data.task_id,
+                verdict=verdict,
+                summary="Initial rejection" if verdict == "REJECTED" else "Approved on retry",
+                blocking_issues=["Security concern"] if verdict == "REJECTED" else [],
+                content="Review notes",
+            )
+
+        return Agents(agents.planner, agents.coder, agents.tester, AsyncMock(run=dynamic_review))
+
+    h.pipeline.agents = factory
+    result = await h.pipeline.run("Fix")
+    assert result.status == "SUCCEEDED"
+    assert result.attempts == 2
+    assert h.events == ["planner", "coder", "tester", "reviewer", "coder", "tester", "reviewer"]
+    coder_input_2 = h.inputs[4]
+    assert isinstance(coder_input_2, CoderInput)
+    assert coder_input_2.attempt == 2
+    reviewer_findings = [f for f in coder_input_2.findings if f.source == "reviewer"]
+    assert any("Security concern" in f.problem for f in reviewer_findings)
+
+
 async def test_correction_limit(repo: Path, tmp_path: Path) -> None:
     h = Harness(repo, tmp_path / "reports")
     h.fail_tests = 10
@@ -244,7 +281,11 @@ async def test_correction_limit(repo: Path, tmp_path: Path) -> None:
     [
         ("questions", "planner", ["planner"]),
         ("escalation", "coder", ["planner", "coder"]),
-        ("rejection", "reviewer", ["planner", "coder", "tester", "reviewer"]),
+        (
+            "rejection",
+            "reviewer",
+            ["planner", "coder", "tester", "reviewer", "coder", "tester", "reviewer"],
+        ),
         ("runtime", "tester", ["planner", "coder", "tester"]),
         ("foreign", "coder", ["planner", "coder"]),
     ],

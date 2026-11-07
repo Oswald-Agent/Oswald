@@ -390,13 +390,14 @@ class Orchestrator:
                         )
                         review = await save("review", review, ReviewVerdict)
                         latest_review = review
-                    if review.verdict == "REJECTED":
-                        reason = review.summary + ": " + "; ".join(review.blocking_issues)
-                        break
                     if clean_tests and review.verdict == "APPROVED" and not review.blocking_issues:
                         status, reason = "SUCCEEDED", "Tests passed and Reviewer approved"
                         break
-                    if not clean_tests:
+                    if review.verdict == "REJECTED":
+                        reason = review.summary + ": " + "; ".join(review.blocking_issues)
+                        if attempt == start_attempt + 1:
+                            break
+                    elif not clean_tests:
                         stage = "tester"
                         reason = "Tests failed: " + tests.content
                     else:
