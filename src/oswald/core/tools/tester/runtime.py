@@ -21,6 +21,7 @@ from oswald.core.tools.coder.read import (
     normalize_workspace_rel_path,
     validate_workspace_path,
 )
+from oswald.core.vcs.worktree import checkout_file_from_ref
 
 logger = structlog.get_logger(component="tools.tester")
 
@@ -354,6 +355,7 @@ async def execute_test_command(
     sandbox: SandboxRuntime,
     command: list[str],
     timeout_seconds: float = 120.0,
+    env: dict[str, str] | None = None,
 ) -> CommandResult:
     """Run an argument-vector command in the isolated sandbox without shell wrapping."""
     clean = [str(part) for part in command if str(part).strip()]
@@ -363,14 +365,22 @@ async def execute_test_command(
             [], 1, "PermissionDenied: command must contain at least one argument.", 0.0
         )
 
+    ci_env = {
+        "CI": "1",
+        "DEBIAN_FRONTEND": "noninteractive",
+        "NO_COLOR": "1",
+        "TERM": "dumb",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPYCACHEPREFIX": "/tmp/oswald-test-pycache",  # noqa: S108
+    }
+    if env:
+        ci_env.update(env)
+
     try:
         result = await sandbox.exec_command(
             clean,
             timeout_seconds=timeout_seconds,
-            env={
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONPYCACHEPREFIX": "/tmp/oswald-test-pycache",  # noqa: S108
-            },
+            env=ci_env,
         )
     except SandboxTimeoutError as exc:
         logger.error("test_tool.command_timeout", command=clean, timeout=timeout_seconds)
@@ -464,10 +474,28 @@ class WorkspaceSnapshot:
 
         return cls(captured)
 
+    @staticmethod
+    def _restore_from_git(root: Path, rel_path: str, base_ref: str = "HEAD") -> bool:
+        """Check out original file from Git base ref when in-memory cache was skipped."""
+        if checkout_file_from_ref(root, base_ref, rel_path):
+            logger.info(
+                "test_snapshot.large_file_restored_from_git",
+                path=rel_path,
+                base_ref=base_ref,
+            )
+            return True
+        logger.error(
+            "test_snapshot.git_checkout_failed",
+            path=rel_path,
+            base_ref=base_ref,
+        )
+        return False
+
     def restore_non_test_changes(
         self,
         workspace_root: Path,
         test_roots: set[str] | None = None,
+        base_ref: str = "HEAD",
     ) -> list[str]:
         """Restore any non-test file changed or created since capture.
 
@@ -518,6 +546,8 @@ class WorkspaceSnapshot:
                         with contextlib.suppress(OSError):
                             target.chmod(orig_info.mode)
                     logger.info("test_snapshot.non_test_file_restored", path=path)
+                else:
+                    self._restore_from_git(root, path, base_ref=base_ref)
 
         return affected
 

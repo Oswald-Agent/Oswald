@@ -354,6 +354,24 @@ async def test_execute_test_command_variations(workspace: Path) -> None:
     assert "Sandbox execution error" in err.output
 
 
+async def test_execute_test_command_injects_non_interactive_ci_environment(
+    workspace: Path,
+) -> None:
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    await sandbox.start()
+    sandbox.queue_response(exit_code=0, stdout="OK")
+
+    await execute_test_command(sandbox, ["pytest", "tests/"])
+
+    assert sandbox.executed_envs, "Expected executed_envs to record environment"
+    env = sandbox.executed_envs[-1]
+    assert env["CI"] == "1"
+    assert env["DEBIAN_FRONTEND"] == "noninteractive"
+    assert env["NO_COLOR"] == "1"
+    assert env["TERM"] == "dumb"
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
 def test_snapshot_restores_non_test_mutations(workspace: Path) -> None:
     snapshot = WorkspaceSnapshot.capture(workspace)
     (workspace / "app.py").write_text("changed", encoding="utf-8")
@@ -377,6 +395,50 @@ def test_snapshot_allows_coverage_and_test_artifacts(workspace: Path) -> None:
     assert affected == []
     assert (workspace / ".coverage").exists()
     assert (workspace / "junit.xml").exists()
+
+
+def test_snapshot_restores_large_file_via_git_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+    import subprocess
+
+    from oswald.core.tools.tester import runtime
+
+    git_bin = shutil.which("git") or "/usr/bin/git"
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run([git_bin, "init"], cwd=repo_dir, check=True, capture_output=True)  # noqa: S603
+    subprocess.run(  # noqa: S603
+        [git_bin, "config", "user.name", "Test"], cwd=repo_dir, check=True, capture_output=True
+    )
+    subprocess.run(  # noqa: S603
+        [git_bin, "config", "user.email", "test@example.com"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    large_file = repo_dir / "large_model.bin"
+    large_file.write_bytes(b"initial large binary data payload" * 10)
+    subprocess.run(  # noqa: S603
+        [git_bin, "add", "."], cwd=repo_dir, check=True, capture_output=True
+    )
+    subprocess.run(  # noqa: S603
+        [git_bin, "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True
+    )
+
+    monkeypatch.setattr(runtime, "_MAX_SNAPSHOT_FILE_BYTES", 50)
+
+    snapshot = WorkspaceSnapshot.capture(repo_dir)
+    assert snapshot.files["large_model.bin"].content is None
+
+    large_file.write_bytes(b"corrupted mutations by test command")
+    assert large_file.read_bytes() == b"corrupted mutations by test command"
+
+    affected = snapshot.restore_non_test_changes(repo_dir)
+    assert affected == ["large_model.bin"]
+    assert large_file.read_bytes() == b"initial large binary data payload" * 10
 
 
 def test_is_test_related_path_multi_platform_and_languages() -> None:
@@ -963,6 +1025,93 @@ async def test_zero_tests_and_diagnostics_cannot_pass(workspace: Path, diagnosti
     assert result.tests_run == 0
 
 
+async def test_tester_passed_evaluation_requires_positive_test_counts_and_zero_failures(
+    workspace: Path,
+) -> None:
+    llm = FakeLLMClient()
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    sandbox.queue_response(exit_code=0, stdout="No tests found\n")
+    await sandbox.start()
+    llm.enqueue(
+        LLMResponse(
+            stop_reason=StopReason.TOOL_USE,
+            tool_calls=[
+                ToolCall(
+                    id="run",
+                    name="run_test_command",
+                    arguments={"command": ["pytest"]},
+                )
+            ],
+        )
+    )
+    llm.enqueue_text('{"status": "COMPLETED", "content": "Done"}')
+    result = await TesterAgent(llm, sandbox, workspace).run(_input())
+    assert result.passed is False
+    assert result.exit_code != 0
+    assert result.tests_run == 0
+
+    llm2 = FakeLLMClient()
+    sandbox2 = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    sandbox2.queue_response(exit_code=0, stdout="Ran 5 tests in 0.05s\nFAILED (failures=2)")
+    await sandbox2.start()
+    llm2.enqueue(
+        LLMResponse(
+            stop_reason=StopReason.TOOL_USE,
+            tool_calls=[
+                ToolCall(
+                    id="run",
+                    name="run_test_command",
+                    arguments={"command": ["python", "-m", "unittest"]},
+                )
+            ],
+        )
+    )
+    llm2.enqueue_text('{"status": "COMPLETED", "content": "Done"}')
+    result2 = await TesterAgent(llm2, sandbox2, workspace).run(_input())
+    assert result2.passed is False
+    assert result2.exit_code != 0
+    assert result2.tests_run == 5
+    assert result2.tests_failed == 2
+
+
+async def test_execution_ledger_flags_conflicting_exit_codes_as_flaky(
+    workspace: Path,
+) -> None:
+    llm = FakeLLMClient()
+    sandbox = FakeSandboxRuntime(SandboxConfig(task_id="tester-1", workspace_path=workspace))
+    sandbox.queue_response(exit_code=1, stdout="= 1 failed in 0.01s =")
+    sandbox.queue_response(exit_code=0, stdout="= 1 passed in 0.01s =")
+    await sandbox.start()
+
+    command = ["pytest", "tests/test_flaky.py"]
+    llm.enqueue(
+        LLMResponse(
+            stop_reason=StopReason.TOOL_USE,
+            tool_calls=[
+                ToolCall(id="run-1", name="run_test_command", arguments={"command": command})
+            ],
+        )
+    )
+    llm.enqueue(
+        LLMResponse(
+            stop_reason=StopReason.TOOL_USE,
+            tool_calls=[
+                ToolCall(id="run-2", name="run_test_command", arguments={"command": command})
+            ],
+        )
+    )
+    llm.enqueue_text('{"status": "COMPLETED", "content": "Claimed flaky pass"}')
+
+    agent = TesterAgent(llm, sandbox, workspace)
+    result = await agent.run(_input())
+
+    assert result.passed is False
+    assert result.exit_code != 0
+    assert result.execution_error is not None
+    assert "FLAKY" in result.execution_error
+    assert "[FLAKY]" in result.output
+
+
 @pytest.mark.parametrize(
     "output,expected",
     [
@@ -1047,3 +1196,62 @@ def test_colored_vitest_metrics_use_tests_not_file_counts(
         f"\x1b[2m      Tests \x1b[22m \x1b[32m{summary}\x1b[39m (6)\n"
     )
     assert TesterAgent._extract_metrics([CommandResult(["npm", "test"], 0, output, 1)]) == expected
+
+
+def test_extract_metrics_strips_ansi_csi_osc_and_cursor_control() -> None:
+    from oswald.core.tools.tester.runtime import CommandResult
+
+    jest_output = (
+        "\x1b]0;jest /workspace\x07\x1b[?25l"
+        "\x1b[2K\x1b[1G PASS  tests/index.test.js\n"
+        "\x1b[2K\x1b[1GTests:       1 failed, 4 passed, 5 total\x1b[?25h\n"
+    )
+    assert TesterAgent._extract_metrics([CommandResult(["npm", "test"], 1, jest_output, 0.5)]) == (
+        5,
+        1,
+    )
+
+    pytest_output = (
+        "\x1b]0;pytest\x1b\\\x1b[2K\x1b[1G\x1b[32m= 10 passed, 2 failed in 0.45s =\x1b[0m\n"
+    )
+    assert TesterAgent._extract_metrics([CommandResult(["pytest"], 1, pytest_output, 0.45)]) == (
+        12,
+        2,
+    )
+
+
+def test_initial_messages_omits_coder_narrative_commentary(workspace: Path) -> None:
+    agent = TesterAgent(
+        FakeLLMClient(),
+        FakeSandboxRuntime(SandboxConfig(task_id="t-1", workspace_path=workspace)),
+        workspace,
+    )
+    inp = TesterInput(
+        task_id="t-1",
+        spec=PlanSpec(
+            task_id="t-1",
+            summary="Spec summary",
+            target_files=["app.py"],
+            content="# Spec",
+            acceptance_criteria=["Criterion 1"],
+        ),
+        changes=CodeChanges(
+            task_id="t-1",
+            summary="Subjective summary of changes",
+            content="Subjective narrative explaining why tests should pass easily.",
+            modified_files=["app.py"],
+            diff="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new",
+            test_attention=["Check new output"],
+        ),
+    )
+    messages = agent._build_initial_messages(inp)
+    user_prompt = messages[1].content
+
+    assert "Subjective narrative explaining why tests should pass easily." not in user_prompt
+    assert "changes.md" not in user_prompt
+    assert "Subjective summary of changes" not in user_prompt
+
+    assert "## Unified Diff" in user_prompt
+    assert "## Modified Files (Strict Source Isolation)" in user_prompt
+    assert "## Required Test Attention" in user_prompt
+    assert "Check new output" in user_prompt
