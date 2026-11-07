@@ -1083,3 +1083,56 @@ async def test_orchestrator_dependency_setup_offline_fallbacks(repo: Path, tmp_p
     fallback_npm = next(c for c in cmds if len(c) > 0 and "--offline" in c)
     assert fallback_npm[0] == "npm"
     assert "/host-cache/node" in fallback_npm
+
+
+async def test_continue_task_injects_human_clarification_on_open_questions(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Verify continue_task injects human clarification into planner prompt to resolve open questions."""
+    h = Harness(repo, tmp_path / "reports")
+    h.questions = True
+    result = await h.pipeline.run("Ambiguous initial task")
+    assert result.status == "STOPPED"
+    assert result.stage == "planner"
+    assert "Unresolved planning questions" in result.reason
+    assert "Which value?" in result.reason
+
+    # Continue task with human clarification resolving the open question
+    h.events.clear()
+    h.inputs.clear()
+    h.questions = False
+    clarification_text = "Set value strictly to 42"
+
+    continued = await h.pipeline.continue_task(result.task_id, clarification=clarification_text)
+    assert continued.status == "SUCCEEDED"
+    assert continued.task_id == result.task_id
+
+    # Verify that planner was reinvoked and received the clarification
+    planner_input = next(x for x in h.inputs if isinstance(x, PlannerInput))
+    assert clarification_text in planner_input.request
+    assert clarification_text in planner_input.prompt
+    assert "Clarification: Set value strictly to 42" in planner_input.request
+    assert h.events == ["planner", "coder", "tester", "reviewer"]
+
+
+async def test_continue_task_with_clarification_from_stopped_stage(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Verify continue_task routes back to Planner when clarification is provided for a stopped task."""
+    h = Harness(repo, tmp_path / "reports")
+    h.fail_tests = 3  # Exhausts attempts
+    result = await h.pipeline.run("Initial feature")
+    assert result.status in {"FAILED", "STOPPED"}
+
+    # Resuming with clarification routes back to planner
+    h.events.clear()
+    h.inputs.clear()
+    h.fail_tests = 0
+    continued = await h.pipeline.continue_task(
+        result.task_id, clarification="Use simplified implementation"
+    )
+    assert continued.status == "SUCCEEDED"
+    assert h.events[0] == "planner"
+    planner_input = next(x for x in h.inputs if isinstance(x, PlannerInput))
+    assert "Clarification: Use simplified implementation" in planner_input.request
+    assert "Clarification: Use simplified implementation" in planner_input.prompt

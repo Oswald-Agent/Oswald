@@ -171,6 +171,27 @@ async def test_cli_continue_dispatches_task_id(tmp_path: Path, image: str | None
         pipeline.return_value.run.assert_not_called()
 
 
+async def test_cli_continue_forwards_clarification(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        repo=str(tmp_path),
+        output=str(tmp_path / "reports"),
+        plan=None,
+        planner=None,
+        image="project:prepared",
+        stage_timeout=60,
+        request="continue",
+        task_id="abc",
+        clarification="Use port 8080",
+    )
+    result = RunResult(task_id="abc", status="SUCCEEDED", stage="reviewer", reason="ok", attempts=1)
+    with patch("oswald.cli.__main__.Orchestrator") as pipeline:
+        pipeline.return_value.continue_task = AsyncMock(return_value=result)
+        assert await run(args) == 0
+        pipeline.return_value.continue_task.assert_awaited_once_with(
+            "abc", image="project:prepared", clarification="Use port 8080"
+        )
+
+
 @pytest.mark.parametrize("allow_network, expected_network_disabled", [(False, True), (True, False)])
 async def test_cli_forwards_allow_network_to_orchestrator(
     tmp_path: Path, allow_network: bool, expected_network_disabled: bool

@@ -320,7 +320,13 @@ def write_test_file(
             return TestEditResult(
                 False, clean, f"Error: old_str matches {matches} occurrences in '{clean}'."
             )
-        updated_content = content.replace(old_str, new_str, 1)
+        if "\r\n" in content and "\r\n" not in new_str:
+            target_new = new_str.replace("\n", "\r\n")
+        elif "\r\n" not in content and "\r\n" in new_str:
+            target_new = new_str.replace("\r\n", "\n")
+        else:
+            target_new = new_str
+        updated_content = content.replace(old_str, target_new, 1)
     else:
         # Cross-platform newline normalization fallback (handles CRLF vs LF differences)
         norm_content = content.replace("\r\n", "\n")

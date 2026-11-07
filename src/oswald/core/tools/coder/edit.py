@@ -34,6 +34,7 @@ class EditResult:
     message: str
     is_protected: bool = False
     is_new_file: bool = False
+    is_deleted: bool = False
 
 
 def is_test_path(rel_path: str) -> bool:
@@ -74,11 +75,13 @@ def is_protected_path(rel_path: str) -> bool:
 def edit_file(
     workspace_root: Path,
     file_path: str,
-    old_str: str,
-    new_str: str,
-    target_files_whitelist: list[str],
+    old_str: str = "",
+    new_str: str = "",
+    target_files_whitelist: list[str] | None = None,
+    *,
+    delete: bool = False,
 ) -> EditResult:
-    """Surgically modify or create a file inside the task worktree.
+    """Surgically modify, create, or delete a file inside the task worktree.
 
     Guards enforced:
         1. Whitelist guard: file_path must be in target_files_whitelist.
@@ -96,7 +99,8 @@ def edit_file(
         )
 
     clean_whitelist = [
-        normalize_workspace_rel_path(workspace_root, f) for f in target_files_whitelist
+        normalize_workspace_rel_path(workspace_root, f)
+        for f in (target_files_whitelist if target_files_whitelist is not None else [])
     ]
 
     # Guard 1: Whitelist check
@@ -134,6 +138,39 @@ def edit_file(
             message=f"SecurityError: {exc}",
         )
 
+    # Explicit file deletion
+    if delete:
+        if not target.exists():
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=f"Error: File '{clean_path}' does not exist to be deleted.",
+                is_protected=is_protected,
+            )
+        if not target.is_file():
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=f"Error: '{clean_path}' is not a file to be deleted.",
+                is_protected=is_protected,
+            )
+        try:
+            target.unlink()
+        except OSError as exc:
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=f"FileSystemError deleting file '{clean_path}': {exc}",
+                is_protected=is_protected,
+            )
+        return EditResult(
+            success=True,
+            file_path=clean_path,
+            message=f"Successfully deleted file '{clean_path}'",
+            is_protected=is_protected,
+            is_deleted=True,
+        )
+
     # Surgical replacement or creation
     if old_str == "":
         # File creation mode
@@ -169,7 +206,7 @@ def edit_file(
         )
 
     try:
-        content = target.read_text(encoding="utf-8")
+        content = target.read_bytes().decode("utf-8")
     except (UnicodeDecodeError, OSError) as exc:
         return EditResult(
             success=False,
@@ -177,26 +214,52 @@ def edit_file(
             message=f"Error reading file '{clean_path}': {exc}",
         )
 
-    count = content.count(old_str)
-    if count == 0:
-        return EditResult(
-            success=False,
-            file_path=clean_path,
-            message=f"Error: old_str was not found in '{clean_path}'. Verify indentation and surrounding lines.",
-        )
-    if count > 1:
-        return EditResult(
-            success=False,
-            file_path=clean_path,
-            message=(
-                f"Error: old_str matches {count} occurrences in '{clean_path}'. "
-                f"Please include more surrounding context lines in old_str to ensure a unique match."
-            ),
-        )
+    # Direct match check
+    if old_str in content:
+        matches = content.count(old_str)
+        if matches != 1:
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=(
+                    f"Error: old_str matches {matches} occurrences in '{clean_path}'. "
+                    f"Please include more surrounding context lines in old_str to ensure a unique match."
+                ),
+            )
+        if "\r\n" in content and "\r\n" not in new_str:
+            target_new = new_str.replace("\n", "\r\n")
+        elif "\r\n" not in content and "\r\n" in new_str:
+            target_new = new_str.replace("\r\n", "\n")
+        else:
+            target_new = new_str
+        updated_content = content.replace(old_str, target_new, 1)
+    else:
+        # Cross-platform newline normalization fallback (handles CRLF vs LF differences)
+        norm_content = content.replace("\r\n", "\n")
+        norm_old = old_str.replace("\r\n", "\n")
+        norm_new = new_str.replace("\r\n", "\n")
+        matches = norm_content.count(norm_old)
+        if matches == 0:
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=f"Error: old_str was not found in '{clean_path}'. Verify indentation and surrounding lines.",
+            )
+        if matches > 1:
+            return EditResult(
+                success=False,
+                file_path=clean_path,
+                message=(
+                    f"Error: old_str matches {matches} occurrences in '{clean_path}'. "
+                    f"Please include more surrounding context lines in old_str to ensure a unique match."
+                ),
+            )
+        updated_norm = norm_content.replace(norm_old, norm_new, 1)
+        # Restore CRLF if file originally used CRLF line endings
+        updated_content = updated_norm.replace("\n", "\r\n") if "\r\n" in content else updated_norm
 
-    updated_content = content.replace(old_str, new_str, 1)
     try:
-        target.write_text(updated_content, encoding="utf-8")
+        target.write_bytes(updated_content.encode("utf-8"))
     except OSError as exc:
         return EditResult(
             success=False,
@@ -210,4 +273,20 @@ def edit_file(
         message=f"Successfully updated '{clean_path}'",
         is_protected=is_protected,
         is_new_file=False,
+    )
+
+
+def delete_file(
+    workspace_root: Path,
+    file_path: str,
+    target_files_whitelist: list[str],
+) -> EditResult:
+    """Explicitly delete a file inside the task worktree within the target files whitelist."""
+    return edit_file(
+        workspace_root=workspace_root,
+        file_path=file_path,
+        old_str="",
+        new_str="",
+        target_files_whitelist=target_files_whitelist,
+        delete=True,
     )

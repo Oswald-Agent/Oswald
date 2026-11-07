@@ -158,14 +158,13 @@ class WorktreeManager:
                 ]
             )
         except WorktreeError as exc:
-            # Rollback: remove worktree first, then prune, and finally delete branch
+            # Rollback: remove task worktree and delete task branch
             await self._run_git(
                 ["worktree", "remove", "--force", str(worktree_path)],
                 check=False,
             )
             if worktree_path.exists():
                 shutil.rmtree(worktree_path, ignore_errors=True)
-            await self._run_git(["worktree", "prune"], check=False)
             await self._run_git(["branch", "-D", branch_name], check=False)
             raise WorktreeError(
                 f"Failed to create worktree for task '{task_id}': {exc.message}",
@@ -295,9 +294,6 @@ class WorktreeManager:
         # Filesystem fallback if git worktree remove left artifacts
         if worktree_path.exists():
             shutil.rmtree(worktree_path, ignore_errors=True)
-
-        # Prune dead worktree metadata
-        await self._run_git(["worktree", "prune"], check=False)
 
         # Delete task branch
         if delete_branch:

@@ -47,6 +47,11 @@ class PlannerInput(BaseModel):
     workspace_root: Path
     base_commit: str
 
+    @property
+    def prompt(self) -> str:
+        """Alias request to prompt for planner agent compatibility."""
+        return self.request
+
 
 class Agent[Input, Output](Protocol):
     async def run(self, data: Input) -> Output: ...
@@ -114,7 +119,13 @@ class Orchestrator:
         RunProgress("", interval=progress_interval)
         self.progress_interval = progress_interval
 
-    async def continue_task(self, task_id: str, *, image: str | None = None) -> RunResult:
+    async def continue_task(
+        self,
+        task_id: str,
+        *,
+        image: str | None = None,
+        clarification: str | None = None,
+    ) -> RunResult:
         """Restore a finished invocation and retry its unfinished stage, without replanning."""
         if UUID(task_id).hex != task_id:
             raise ValueError("Expected the task ID printed by the orchestrator")
@@ -141,7 +152,13 @@ class Orchestrator:
         effective_image = self.image if self.image is not None else image
         if effective_image is not None:
             previous = previous.model_copy(update={"image": effective_image})
-        return await self._run(data.request, base_ref=data.base_commit, previous=previous)
+
+        request = data.request
+        if clarification and clarification.strip():
+            request = f"{data.request}\n\nClarification: {clarification.strip()}"
+            previous = previous.model_copy(update={"resume_stage": "planner"})
+
+        return await self._run(request, base_ref=data.base_commit, previous=previous)
 
     async def run(self, request: str, *, base_ref: str = "HEAD") -> RunResult:
         return await self._run(request, base_ref=base_ref)
@@ -446,7 +463,7 @@ class Orchestrator:
                 ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
-            if previous and previous.patch_path:
+            if previous and previous.patch_path and resume_stage != "planner":
                 target = report_dir / "final.patch"
                 if await asyncio.to_thread(target.read_bytes):
                     await call(manager.apply_patch(task_id, target))
